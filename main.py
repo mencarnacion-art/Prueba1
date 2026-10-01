@@ -1,9 +1,9 @@
-fastapi
-uvicorn
-openai
-python-pptx
-requests
-
+#fastapi
+#uvicorn
+#openai
+#python-pptx
+#requests
+#
 import os, time, json, requests, openai, smtplib
 from fastapi import FastAPI, Request
 from email.mime.multipart import MIMEMultipart
