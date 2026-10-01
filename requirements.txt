@@ -1,0 +1,4 @@
+bot-automatyco/
+├── main.py <- el código de abajo
+├── Reporte.pptx <- tu plantilla (la que me mandaste)
+└── requirements.txt
