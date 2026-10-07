@@ -10,9 +10,12 @@ from pptx.util import Inches
 
 app = FastAPI()
 
-openai.api_key = os.getenv("OPENAI_KEY")
+openai.api_key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
+PHONE_ID = os.getenv("PHONE_ID") or os.getenv("PHONE_NUMBER_ID")
+
+#openai.api_key = os.getenv("OPENAI_KEY")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_ID = os.getenv("PHONE_ID")
+#PHONE_ID = os.getenv("PHONE_ID")
 GMAIL_USER = os.getenv("GMAIL_USER", "mencarnacion@automatyco.com")
 GMAIL_APP_PASS = os.getenv("GMAIL_PASS")
 DESTINO = "mencarnacion@automatyco.com"
