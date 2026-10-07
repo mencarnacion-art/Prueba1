@@ -63,8 +63,10 @@ async def webhook(request: Request):
                 "to": from_num,
                 "text": {"body": f"✅ Recibido Automatyco: {texto}"}
             }
-            requests.post(url, json=payload, headers=headers)
-
+            
+            #requests.post(url, json=payload, headers=headers)
+r = requests.post(url, json=payload, headers=headers)
+print(f"Respuesta WhatsApp: {r.status_code} - {r.text}")
     except Exception as e:
         print(f"Error procesando: {e}")
 
