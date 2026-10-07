@@ -4,6 +4,8 @@
 #python-pptx
 #requests
 #
+from fastapi.responses import PlainTextResponse
+#
 import os, time, json, requests, openai, smtplib
 from fastapi import FastAPI, Request
 from email.mime.multipart import MIMEMultipart
@@ -123,8 +125,16 @@ async def webhook(req: Request):
     except Exception as e: print(e)
     return {"ok":True}
 
+#@app.get("/webhook")
+#async def verify(request: Request):
+    #if request.query_params.get("hub.verify_token")=="automatyco123":
+     #   return int(request.query_params.get("hub.challenge"))
+    #return {"error":"fail"}
+
 @app.get("/webhook")
 async def verify(request: Request):
-    if request.query_params.get("hub.verify_token")=="automatyco123":
-        return int(request.query_params.get("hub.challenge"))
-    return {"error":"fail"}
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if token == "automatyco123" and challenge:
+        return PlainTextResponse(challenge)
+    return PlainTextResponse("Forbidden", status_code=403)
