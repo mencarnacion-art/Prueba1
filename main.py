@@ -48,5 +48,17 @@ async def webhook(request: Request):
     return PlainTextResponse("ok", status_code=200)
 
 @app.get("/")
+
+#politicas de privacidad 
+@app.get("/privacy")
+def privacy():
+    return PlainTextResponse("Politica de privacidad Automatyco: No almacenamos datos personales fuera de WhatsApp. Uso interno para asistencia tecnica.")
+
+@app.get("/terms")
+def terms():
+    return PlainTextResponse("Terminos de servicio Automatyco - Uso interno.")
+
+
+#
 def home():
     return {"status": "online"}
