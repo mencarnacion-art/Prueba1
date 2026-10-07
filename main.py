@@ -1,13 +1,6 @@
-#fastapi
-#uvicorn
-#openai
-#python-pptx
-#requests
-#
-from fastapi.responses import PlainTextResponse
-#
 import os, time, json, requests, openai, smtplib
 from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -17,7 +10,6 @@ from pptx.util import Inches
 
 app = FastAPI()
 
-# TUS LLAVES - PONLAS EN RAILWAY COMO VARIABLES
 openai.api_key = os.getenv("OPENAI_KEY")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
@@ -36,35 +28,18 @@ def enviar_whatsapp(para, texto):
 def crear_ppt(sesion):
     datos = sesion['datos']; fotos = sesion['fotos']
     prs = Presentation("Reporte.pptx")
-
-    # Slide 1: Empresa
     for shape in prs.slides[0].shapes:
         if shape.has_text_frame and "Empresa" in shape.text:
             shape.text = f"Empresa: {datos.get('cliente','')}"
-
-    # Insertar contenido ANTES de la última diapositiva
-    def insertar_antes_del_final():
-        xml_list = prs.slides._sldIdLst
-        last = list(xml_list)[-1]
-        xml_list.remove(last)
-        xml_list.insert(len(list(xml_list))-0, last) # placeholder
-        return last
-
-    # Slide 2: Datos del audio
     slide = prs.slides.add_slide(prs.slide_layouts[1])
-    # Moverla a posición 1
     sldIdLst = prs.slides._sldIdLst
     new_slide = list(sldIdLst)[-1]
     sldIdLst.remove(new_slide)
     sldIdLst.insert(1, new_slide)
-
     prs.slides[1].shapes.title.text = f"Visita: {datos.get('visita','')} - {datos.get('cliente','')}"
     prs.slides[1].placeholders[1].text = f"PROBLEMA:\n{datos.get('problema','')}\n\nSOLUCIÓN:\n{datos.get('solucion','')}"
-
-    # Slides de fotos
     for i, foto in enumerate(fotos):
         s = prs.slides.add_slide(prs.slide_layouts[5])
-        # Mover antes del final
         sldIdLst = prs.slides._sldIdLst
         ns = list(sldIdLst)[-1]
         sldIdLst.remove(ns)
@@ -73,7 +48,6 @@ def crear_ppt(sesion):
         try:
             prs.slides[idx].shapes.add_picture(foto, Inches(0.5), Inches(1.2), Inches(9), Inches(4.5))
         except: pass
-
     nombre = f"Reporte_{datos.get('cliente','Cliente')}.pptx"
     prs.save(nombre)
     return nombre
@@ -124,12 +98,6 @@ async def webhook(req: Request):
             sesiones[de]={"datos":{}, "fotos":[]}
     except Exception as e: print(e)
     return {"ok":True}
-
-#@app.get("/webhook")
-#async def verify(request: Request):
-    #if request.query_params.get("hub.verify_token")=="automatyco123":
-     #   return int(request.query_params.get("hub.challenge"))
-    #return {"error":"fail"}
 
 @app.get("/webhook")
 async def verify(request: Request):
