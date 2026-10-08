@@ -42,13 +42,13 @@ def parse_data(texts):
 
 def replace_keep_format(shape, old, new):
     if not shape.has_text_frame: return False
-    found=False
+    changed=False
     for p in shape.text_frame.paragraphs:
         for run in p.runs:
             if old in run.text:
                 run.text=run.text.replace(old,new)
-                found=True
-    return found
+                changed=True
+    return changed
 
 def create_pptx(texts, images):
     empresa, tecnico, fecha, trabajo = parse_data(texts)
@@ -62,73 +62,48 @@ def create_pptx(texts, images):
         replace_keep_format(shape,"{Tecnico}",tecnico)
         replace_keep_format(shape,"{FECHA}",fecha)
 
-    # 2. Buscar slide con {TRABAJO} y rellenarlo
-    trabajo_rellenado=False
-    for slide in prs.slides[1:]: # desde slide 2
+    # 2. Rellenar {TRABAJO}
+    for slide in prs.slides[1:]:
         for shape in slide.shapes:
             if shape.has_text_frame and "{TRABAJO}" in shape.text:
-                # reemplazo conservando formato
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
                         if "{TRABAJO}" in run.text:
                             run.text=run.text.replace("{TRABAJO}", trabajo)
-                            trabajo_rellenado=True
-                # si quedó solo "Tabajo realizado:" + trabajo, ajusta
-                if not trabajo_rellenado and "{TRABAJO}" in shape.text:
-                    shape.text=shape.text.replace("{TRABAJO}", trabajo)
-                    trabajo_rellenado=True
 
-    # Si no encontró {TRABAJO}, crea la descripción en slide 2
-    if not trabajo_rellenado and len(prs.slides)>1:
-        for shape in prs.slides[1].shapes:
-            if shape.has_text_frame and "Trabajo realizado" in shape.text:
-                # agrega debajo
-                shape.text_frame.paragraphs[0].runs[0].text = f"Trabajo realizado:\n{trabajo}"
-                trabajo_rellenado=True
-                break
+    # 3. Fotos - truco sin bug: sacamos la ultima slide, agregamos fotos, y regresamos la ultima
+    if len(prs.slides) > 1 and len(images) > 0:
+        sldIdLst = prs.slides._sldIdLst
+        last_sldId = sldIdLst[-1]
+        sldIdLst.remove(last_sldId) # quitamos cierre temporalmente
 
-    # 3. Fotos -> usar slides vacías de la plantilla primero (slide 3 en adelante)
-    # Consideramos que la última slide es cierre y no se toca
-    last_idx = len(prs.slides)-1
-    img_idx=0
-    from pptx.util import Inches
-    # primero intenta llenar slides vacías que ya existen
-    for i in range(2, len(prs.slides)):
-        if i==last_idx: continue # no tocar última
-        if img_idx>=len(images): break
-        slide=prs.slides[i]
-        # si la slide está vacía o solo tiene el header/footer de tu plantilla
-        has_pic=len(slide.shapes)>0 and any(s.shape_type==13 for s in slide.shapes) # ya tiene foto
-        if has_pic: continue
-        # si es la de trabajo ya rellenada, saltar
-        if trabajo_rellenado and i==1: continue
-        # mete foto
-        try:
+        layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
+
+        # primero intenta usar slides vacias que ya existen (del 2 en adelante)
+        img_idx = 0
+        for i in range(2, len(prs.slides)):
+            if img_idx >= len(images): break
+            slide = prs.slides[i]
+            if len(slide.shapes) < 2: # probablemente vacia (solo header/footer de tu plantilla)
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                        tf.write(images[img_idx]); path=tf.name
+                    slide.shapes.add_picture(path, Inches(0.5), Inches(0.9), Inches(12), Inches(5.8))
+                    os.unlink(path)
+                    img_idx+=1
+                except: pass
+
+        # resto de fotos en slides nuevas
+        while img_idx < len(images):
+            s = prs.slides.add_slide(layout)
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
                 tf.write(images[img_idx]); path=tf.name
-            slide.shapes.add_picture(path, Inches(0.5), Inches(0.9), Inches(12), Inches(5.8))
+            s.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(12), Inches(6.2))
             os.unlink(path)
             img_idx+=1
-        except Exception as e:
-            print(e)
 
-    # Si aún quedan fotos, crea nuevas antes de la última
-    def add_before_last():
-        layout=prs.slide_layouts[6] if len(prs.slide_layouts)>6 else prs.slide_layouts[-1]
-        new=prs.slides.add_slide(layout)
-        sldIdLst=prs.slides._sldIdLst
-        new_id=sldIdLst[-1]
-        sldIdLst.remove(new_id)
-        sldIdLst.insert(-1, new_id) # antes de la última
-        return new
-
-    while img_idx < len(images):
-        s=add_before_last()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tf.write(images[img_idx]); path=tf.name
-        s.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(12), Inches(6.2))
-        os.unlink(path)
-        img_idx+=1
+        # regresamos la ultima al final
+        sldIdLst.append(last_sldId)
 
     bio=io.BytesIO(); prs.save(bio); bio.seek(0); return bio.getvalue()
 
@@ -152,7 +127,7 @@ async def webhook(req: Request):
             body=msg["text"]["body"].strip()
             if body.lower() in ["generar reporte","generar","reporte"]:
                 sess=SESSIONS[from_num]
-                send_text(from_num, f"Generando reporte final con formato... {len(sess['images'])} fotos")
+                send_text(from_num, f"Generando... {len(sess['images'])} fotos")
                 pptx=create_pptx(sess["texts"], sess["images"])
                 send_doc(from_num, pptx, filename=f"Reporte_{from_num}.pptx")
                 SESSIONS[from_num]={"texts":[],"images":[]}
@@ -167,5 +142,6 @@ async def webhook(req: Request):
             SESSIONS[from_num]["images"].append(img)
             send_text(from_num, f"Foto {len(SESSIONS[from_num]['images'])} guardada")
     except Exception as e:
-        print(e)
+        print(f"Error: {e}")
+        import traceback; traceback.print_exc()
     return "ok"
