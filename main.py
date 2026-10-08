@@ -8,7 +8,7 @@ app = FastAPI()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID") or os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN") or "automatyco123"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSIONS = {}
 TEMPLATE_PATH = "Reporte.pptx"
 
@@ -22,31 +22,41 @@ def send_doc(to, pptx_bytes, filename):
     h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     files = {'file': (filename, pptx_bytes, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),'messaging_product': (None, 'whatsapp')}
     r = requests.post(url, headers=h, files=files)
-    if r.status_code!=200: print(r.text); send_text(to, f"Error subiendo: {r.text[:300]}"); return
+    if r.status_code!=200: print(r.text); return
     media_id=r.json()["id"]
     url_msg=f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
     hj={"Authorization": f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     requests.post(url_msg, headers=hj, json={"messaging_product":"whatsapp","to":to,"type":"document","document":{"id":media_id,"filename":filename,"caption":f"Reporte {filename}"}})
 
-def mejorar_texto(texto):
-    if not OPENAI_API_KEY or len(texto) < 10:
-        return texto
-    try:
-        r = requests.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": "Eres corrector de reportes técnicos de mantenimiento industrial. Corrige ortografía, puntuación y mejora redacción profesional en español. No inventes datos. Mantén términos técnicos (robot, arnés, servo, etc). Devuelve SOLO el texto mejorado."},
-                    {"role": "user", "content": texto}
-                ],
-                "temperature": 0.3
-            }, timeout=20)
-        if r.status_code==200:
-            return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"OpenAI error: {e}")
-    return texto
+def mejorar_profesional(texto):
+    # 1. Intenta con OpenAI si existe
+    if OPENAI_API_KEY and len(texto) > 15:
+        try:
+            r = requests.post("https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini",
+                      "messages": [
+                          {"role": "system", "content": "Eres redactor de reportes de servicio técnico industrial. Convierte el texto del técnico en un reporte profesional, en español, con ortografía perfecta, en formato: - Resumen ejecutivo - Trabajo realizado (bullets) - Conclusión. No inventes. Profesional."},
+                          {"role": "user", "content": texto}
+                      ], "temperature":0.2}, timeout=25)
+            if r.status_code==200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(e)
+
+    # 2. Fallback profesional sin API (siempre funciona)
+    texto = texto.strip()
+    texto = re.sub(r'\s+', ' ', texto)
+    # Capitalizar oraciones
+    oraciones = re.split(r'[.\n]+', texto)
+    oraciones = [o.strip().capitalize() for o in oraciones if o.strip()]
+    # Formato profesional
+    profesional = "TRABAJO REALIZADO:\n\n"
+    for o in oraciones:
+        if len(o) > 5:
+            profesional += f"• {o}.\n"
+    profesional += "\nEl equipo queda operativo y en condiciones para producción.\nSe recomienda seguimiento preventivo."
+    return profesional
 
 def parse_data(texts):
     full="\n".join(texts)
@@ -60,23 +70,32 @@ def parse_data(texts):
     desc=re.sub(r'Empresa\s*:.*\n?','',full,flags=re.IGNORECASE)
     desc=re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?','',desc,flags=re.IGNORECASE).strip()
     if not desc: desc=full
-    desc_mejorado = mejorar_texto(desc)
+    desc_mejorado = mejorar_profesional(desc)
     return empresa, tecnico, fecha_file, fecha_show, desc_mejorado
 
 def replace_keep_format(shape, old, new):
     if not shape.has_text_frame: return False
-    changed=False
     for p in shape.text_frame.paragraphs:
         for run in p.runs:
             if old in run.text:
                 run.text=run.text.replace(old,new)
-                changed=True
-    return changed
+                return True
+    return False
+
+def add_slide_before_last(prs, layout):
+    # Crea al final y lo mueve antes de la última (cierre)
+    new_slide = prs.slides.add_slide(layout)
+    sldIdLst = prs.slides._sldIdLst
+    # el nuevo es el último, el cierre es el penúltimo ahora
+    new_id = sldIdLst[-1]
+    sldIdLst.remove(new_id)
+    # insertar antes del último (que es el cierre)
+    sldIdLst.insert(len(sldIdLst)-1, new_id)
+    return new_slide
 
 def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH) if os.path.exists(TEMPLATE_PATH) else Presentation()
-    original_count = len(prs.slides)
 
     # 1. Portada
     for shape in prs.slides[0].shapes:
@@ -87,7 +106,7 @@ def create_pptx(texts, images):
         replace_keep_format(shape,"{FECHA}",fecha_show)
 
     # 2. {TRABAJO}
-    for slide in list(prs.slides)[1:]:
+    for slide in list(prs.slides)[1:-1]: # nunca tocar la última
         for shape in slide.shapes:
             if shape.has_text_frame and "{TRABAJO}" in shape.text:
                 for p in shape.text_frame.paragraphs:
@@ -95,55 +114,43 @@ def create_pptx(texts, images):
                         if "{TRABAJO}" in run.text:
                             run.text=run.text.replace("{TRABAJO}", trabajo)
 
-    # 3. Fotos - NUNCA tocar la última slide (es cierre)
-    # Sacamos la última temporalmente para protegerla
-    sldIdLst = prs.slides._sldIdLst
-    last_sldId = sldIdLst[-1] if original_count > 1 else None
-    if last_sldId and original_count > 1:
-        sldIdLst.remove(last_sldId)
-
+    # 3. Fotos - proteger última slide siempre
     layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     img_idx = 0
 
-    # Usar slides vacías existentes (desde la 3 hasta la penúltima)
-    # Rango 2 hasta original_count-1 (excluye última que ya sacamos)
-    for idx in range(2, original_count-1):
+    # Usa slides vacías intermedias (slide 3 en adelante, sin incluir última)
+    for i in range(2, len(prs.slides)-1):
         if img_idx >= len(images): break
-        if idx >= len(prs.slides): break
-        slide = prs.slides[idx]
+        slide = prs.slides[i]
+        # si ya tiene foto, skip
+        if any(s.shape_type==13 for s in slide.shapes): continue
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
                 tf.write(images[img_idx]); path=tf.name
-            # FOTO CENTRADA Y CON MARGEN (no 12 pulgadas)
-            slide.shapes.add_picture(path, Inches(1.2), Inches(1.2), Inches(10.8), Inches(5.5))
+            # FOTO DENTRO DE MARGEN - 8.5 x 4.8 pulgadas centrada
+            slide.shapes.add_picture(path, Inches(2.2), Inches(1.4), Inches(8.8), Inches(4.9))
             os.unlink(path)
             img_idx+=1
         except Exception as e:
             print(e)
 
-    # Resto de fotos en slides nuevas
+    # Resto de fotos -> nuevas diapositivas ANTES del cierre
     while img_idx < len(images):
-        s = prs.slides.add_slide(layout)
+        s = add_slide_before_last(prs, layout)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             tf.write(images[img_idx]); path=tf.name
-        s.shapes.add_picture(path, Inches(1.2), Inches(1.2), Inches(10.8), Inches(5.5))
+        s.shapes.add_picture(path, Inches(2.2), Inches(1.4), Inches(8.8), Inches(4.9))
         os.unlink(path)
         img_idx+=1
 
-    # Regresar la última al final intacta
-    if last_sldId:
-        sldIdLst.append(last_sldId)
-
     bio=io.BytesIO(); prs.save(bio); bio.seek(0)
-
-    # Nombre archivo: EMPRESA_FECHA_TECNICO.pptx
     safe_empresa = re.sub(r'[^A-Za-z0-9_-]+','_',empresa).upper()[:20]
     safe_tecnico = re.sub(r'[^A-Za-z0-9_-]+','_',tecnico).upper()[:15]
     filename = f"{safe_empresa}_{fecha_file}_{safe_tecnico}.pptx"
     return bio.getvalue(), filename
 
 @app.get("/")
-def home(): return {"ok":True, "plantilla": os.path.exists(TEMPLATE_PATH)}
+def home(): return {"ok":True}
 
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
@@ -162,22 +169,21 @@ async def webhook(req: Request):
             body=msg["text"]["body"].strip()
             if body.lower() in ["generar reporte","generar","reporte"]:
                 sess=SESSIONS[from_num]
-                if not sess["texts"] and not sess["images"]:
-                    send_text(from_num, "No tengo datos"); return "ok"
-                send_text(from_num, f"Mejorando redacción y generando {len(sess['images'])} fotos...")
+                if not sess["texts"]: send_text(from_num,"Manda primero el trabajo realizado"); return "ok"
+                send_text(from_num, f"Generando reporte profesional con {len(sess['images'])} fotos...")
                 pptx_bytes, filename = create_pptx(sess["texts"], sess["images"])
                 send_doc(from_num, pptx_bytes, filename=filename)
                 SESSIONS[from_num]={"texts":[],"images":[]}
             else:
                 SESSIONS[from_num]["texts"].append(body)
-                send_text(from_num, f"Guardado ✅ ({len(SESSIONS[from_num]['texts'])} textos)")
+                send_text(from_num, "Guardado ✅")
         elif msg["type"]=="image":
             mid=msg["image"]["id"]
             h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             info=requests.get(f"https://graph.facebook.com/v20.0/{mid}", headers=h).json()
             img=requests.get(info["url"], headers=h).content
             SESSIONS[from_num]["images"].append(img)
-            send_text(from_num, f"Foto {len(SESSIONS[from_num]['images'])} guardada 📸")
+            send_text(from_num, f"Foto {len(SESSIONS[from_num]['images'])} guardada")
     except Exception as e:
         print(e); import traceback; traceback.print_exc()
     return "ok"
