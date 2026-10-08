@@ -3,6 +3,7 @@ import json
 import requests
 import tempfile
 import smtplib
+import ssl
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -15,167 +16,109 @@ from email.mime.text import MIMEText
 from email import encoders
 
 app = FastAPI()
-
-# --- CONFIG ---
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN") or "automatyco123"
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID") or os.getenv("PHONE_NUMBER_ID") or "1335575689641146"
 OPENAI_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY")
-TEMPLATE_PATH = "Reporte.pptx" # tu plantilla que ya subiste
+TEMPLATE_PATH = "Reporte.pptx"
 
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
-
-# Memoria por técnico
 sessions = {}
 
-# --- FUNCIONES WHATSAPP ---
 def send_whatsapp(to, text):
     url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp", "to": to, "text": {"body": text}}
-    requests.post(url, json=payload, headers=headers)
+    requests.post(url, json={"messaging_product": "whatsapp", "to": to, "text": {"body": text}}, headers=headers)
 
 def send_document(to, file_path):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     with open(file_path, "rb") as f:
-        up = requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/media",
-            headers=headers,
-            files={"file": f},
-            data={"messaging_product": "whatsapp", "type": "document"})
+        up = requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/media", headers=headers, files={"file": f}, data={"messaging_product": "whatsapp", "type": "document"})
     media_id = up.json().get("id")
-    if not media_id:
-        print(f"Error subiendo doc: {up.text}")
-        return
+    if not media_id: return
     url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages"
     h2 = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp", "to": to, "type": "document",
-        "document": {"id": media_id, "filename": os.path.basename(file_path)}
-    }
-    requests.post(url, json=payload, headers=h2)
+    requests.post(url, json={"messaging_product": "whatsapp", "to": to, "type": "document", "document": {"id": media_id, "filename": os.path.basename(file_path)}}, headers=h2)
 
 def download_media(media_id):
-    info = requests.get(f"https://graph.facebook.com/v20.0/{media_id}",
-        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()
-    media_url = info.get("url")
-    if not media_url:
-        print(f"No se obtuvo url media: {info}")
-        return None
-    data = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+    info = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()
+    url = info.get("url")
+    if not url: return None
+    data = requests.get(url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
     suffix = ".ogg" if "audio" in info.get("mime_type","") else ".jpg"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(data)
-    tmp.close()
+    tmp.write(data); tmp.close()
     return tmp.name
 
-# --- IA ---
 def transcribe_audio(path):
-    if not client:
-        return "Transcripción no disponible - falta OPENAI_API_KEY"
+    if not client: return "Sin transcripción"
     with open(path, "rb") as f:
-        result = client.audio.transcriptions.create(model="whisper-1", file=f, language="es")
-    return result.text
+        r = client.audio.transcriptions.create(model="whisper-1", file=f, language="es")
+    return r.text
 
-def extract_info(texto_transcrito):
+def extract_info(texto, nombre_whatsapp=""):
     if not client:
-        return {
-            "fecha": datetime.now().strftime("%d/%m/%Y"),
-            "empresa": "Cliente",
-            "trabajo": texto_transcrito
-        }
-    prompt = f"""Del siguiente texto de un técnico extrae un JSON con exactamente estas 3 claves: fecha, empresa, trabajo_realizado.
-Si no hay fecha usa hoy {datetime.now().strftime('%d/%m/%Y')}.
-Texto: "{texto_transcrito}"
-Responde SOLO el JSON."""
+        return {"fecha": datetime.now().strftime("%d/%m/%Y"), "empresa": "Cliente", "trabajo": texto, "tecnico": nombre_whatsapp}
+    prompt = f"""Extrae JSON con claves: fecha, empresa, trabajo_realizado, tecnico.
+Si menciona nombre del técnico úsalo, si no usa "{nombre_whatsapp}".
+Fecha hoy es {datetime.now().strftime('%d/%m/%Y')}.
+Texto: "{texto}"
+Solo JSON."""
     try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
+        r = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], temperature=0)
         txt = r.choices[0].message.content.replace("```json","").replace("```","").strip()
-        return json.loads(txt)
-    except Exception as e:
-        print(f"Error extrayendo info: {e}")
-        return {"fecha": datetime.now().strftime("%d/%m/%Y"), "empresa": "Empresa", "trabajo": texto_transcrito}
+        data = json.loads(txt)
+        if not data.get("tecnico"): data["tecnico"] = nombre_whatsapp
+        return data
+    except:
+        return {"fecha": datetime.now().strftime("%d/%m/%Y"), "empresa": "Empresa", "trabajo": texto, "tecnico": nombre_whatsapp}
 
-# --- POWERPOINT ---
-def generar_pptx(datos, fotos_paths, output_path):
-    if os.path.exists(TEMPLATE_PATH):
-        prs = Presentation(TEMPLATE_PATH)
-    else:
-        prs = Presentation()
-        slide = prs.slides.add_slide(prs.slide_layouts[5])
-        slide.shapes.title.text = f"Reporte {datos.get('empresa','')}"
-
-    # Reemplazar placeholders en todas las diapositivas existentes
+def generar_pptx(datos, fotos, out_path):
+    prs = Presentation(TEMPLATE_PATH) if os.path.exists(TEMPLATE_PATH) else Presentation()
     for slide in prs.slides:
         for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
+            if not shape.has_text_frame: continue
             for para in shape.text_frame.paragraphs:
                 for run in para.runs:
-                    run.text = run.text.replace("{FECHA}", datos.get("fecha","")) \
-                                        .replace("{EMPRESA}", datos.get("empresa","")) \
-                                        .replace("{TRABAJO}", datos.get("trabajo","")) \
-                                        .replace("{{FECHA}}", datos.get("fecha","")) \
-                                        .replace("{{EMPRESA}}", datos.get("empresa","")) \
-                                        .replace("{{TRABAJO}}", datos.get("trabajo",""))
-
-    # Si no se reemplazó nada (plantilla sin marcadores), crear slide resumen
-    if not os.path.exists(TEMPLATE_PATH):
-        slide = prs.slides.add_slide(prs.slide_layouts[5])
-        tx = slide.shapes.add_textbox(Inches(0.5), Inches(1), Inches(9), Inches(2)).text_frame
-        tx.text = f"Fecha: {datos.get('fecha')}\nEmpresa: {datos.get('empresa')}\nTrabajo: {datos.get('trabajo')}"
-
-    # Agregar fotos
-    for foto in fotos_paths:
+                    run.text = run.text.replace("{FECHA}", datos.get("fecha","")).replace("{EMPRESA}", datos.get("empresa","")).replace("{TRABAJO}", datos.get("trabajo","")).replace("{TECNICO}", datos.get("tecnico","")).replace("{{TECNICO}}", datos.get("tecnico","")).replace("{{FECHA}}", datos.get("fecha","")).replace("{{EMPRESA}}", datos.get("empresa","")).replace("{{TRABAJO}}", datos.get("trabajo",""))
+    for foto in fotos:
         try:
-            slide = prs.slides.add_slide(prs.slide_layouts[6]) # blank
-            slide.shapes.add_picture(foto, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
-        except Exception as e:
-            print(f"Error agregando foto: {e}")
+            s = prs.slides.add_slide(prs.slide_layouts[6])
+            s.shapes.add_picture(foto, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
+        except: pass
+    prs.save(out_path)
+    return out_path
 
-    prs.save(output_path)
-    return output_path
-
-def enviar_correo(ruta_pptx, datos):
-    host = os.getenv("SMTP_HOST")
-    if not host:
-        print("SMTP_HOST no configurado, no se envía correo")
-        return
-    to_email = os.getenv("REPORT_EMAIL") or "mencarnacion@automatyco.com"
-    # Soporta múltiples correos separados por coma más adelante
-    destinatarios = [e.strip() for e in to_email.split(",")]
-
+def enviar_correo(ruta, datos):
+    host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
+    port = int(os.getenv("SMTP_PORT","465"))
+    user = os.getenv("SMTP_USER") or "hal@automatyco.com"
+    pwd = (os.getenv("SMTP_PASS") or "lwqd jgli ximy wslf").replace("'","").strip()
+    from_e = os.getenv("SMTP_FROM") or user
+    to_e = os.getenv("REPORT_EMAIL") or "mencarnacion@automatyco.com"
+    dests = [e.strip() for e in to_e.split(",")]
     msg = MIMEMultipart()
-    msg["From"] = os.getenv("SMTP_USER")
-    msg["To"] = ", ".join(destinatarios)
-    msg["Subject"] = f"Reporte Automatyco - {datos.get('empresa')} - {datos.get('fecha')}"
-    msg.attach(MIMEText(f"Fecha: {datos.get('fecha')}\nEmpresa: {datos.get('empresa')}\nTrabajo realizado: {datos.get('trabajo')}\n\nGenerado automático desde WhatsApp.", "plain", "utf-8"))
-
-    with open(ruta_pptx, "rb") as f:
+    msg["From"] = from_e
+    msg["To"] = ", ".join(dests)
+    msg["Subject"] = f"Reporte {datos.get('empresa')} - {datos.get('tecnico')} - {datos.get('fecha')}"
+    msg.attach(MIMEText(f"Técnico: {datos.get('tecnico')}\nFecha: {datos.get('fecha')}\nEmpresa: {datos.get('empresa')}\nTrabajo: {datos.get('trabajo')}"))
+    with open(ruta, "rb") as f:
         part = MIMEBase("application", "vnd.openxmlformats-officedocument.presentationml.presentation")
-        part.set_payload(f.read())
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(ruta_pptx)}")
+        part.set_payload(f.read()); encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(ruta)}")
         msg.attach(part)
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
+            s.login(user, pwd); s.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port) as s:
+            s.starttls(); s.login(user, pwd); s.send_message(msg)
 
-    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT","587"))) as s:
-        s.starttls()
-        s.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASS"))
-        s.send_message(msg)
-    print(f"Correo enviado a {destinatarios}")
-
-# --- WEBHOOKS ---
 @app.get("/webhook")
 async def verify(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(challenge)
-    return PlainTextResponse("Error", status_code=403)
+    if request.query_params.get("hub.mode") == "subscribe" and request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(request.query_params.get("hub.challenge"))
+    return PlainTextResponse("Error", 403)
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -184,63 +127,52 @@ async def webhook(request: Request):
     except:
         return PlainTextResponse("ok", 200)
     try:
-        value = data["entry"][0]["changes"][0]["value"]
-        messages = value.get("messages", [])
-        if not messages:
-            return PlainTextResponse("ok", 200)
-
-        msg = messages[0]
+        entry = data["entry"][0]["changes"][0]["value"]
+        msgs = entry.get("messages", [])
+        if not msgs: return PlainTextResponse("ok", 200)
+        msg = msgs[0]
         from_num = msg["from"]
         mtype = msg["type"]
+        # Nombre del perfil de WhatsApp
+        nombre_perfil = ""
+        try:
+            nombre_perfil = entry.get("contacts", [{}])[0].get("profile", {}).get("name","")
+        except: pass
 
         if from_num not in sessions:
-            sessions[from_num] = {"fotos": [], "datos": {}}
+            sessions[from_num] = {"fotos": [], "datos": {}, "nombre": nombre_perfil}
+        else:
+            sessions[from_num]["nombre"] = nombre_perfil or sessions[from_num].get("nombre","")
 
-        print(f"Mensaje Automatyco de {from_num}: {mtype}")
-
-        if mtype in ("audio", "voice"):
-            media_path = download_media(msg[mtype]["id"])
-            texto = transcribe_audio(media_path)
-            datos = extract_info(texto)
+        if mtype in ("audio","voice"):
+            path = download_media(msg[mtype]["id"])
+            texto = transcribe_audio(path)
+            datos = extract_info(texto, sessions[from_num]["nombre"])
             sessions[from_num]["datos"] = datos
-            send_whatsapp(from_num, f"✅ Audio recibido:\n📅 Fecha: {datos.get('fecha')}\n🏢 Empresa: {datos.get('empresa')}\n🔧 Trabajo: {datos.get('trabajo')}\n\nAhora envía las fotos y escribe *generar reporte*")
-
+            send_whatsapp(from_num, f"✅ Recibido de {datos.get('tecnico')}:\n📅 {datos.get('fecha')}\n🏢 {datos.get('empresa')}\n🔧 {datos.get('trabajo')[:120]}\n\nEnvía fotos y escribe *generar reporte*")
         elif mtype == "image":
-            media_path = download_media(msg["image"]["id"])
-            sessions[from_num]["fotos"].append(media_path)
-            send_whatsapp(from_num, f"📸 Foto {len(sessions[from_num]['fotos'])} guardada. Envía más o escribe *generar reporte*")
-
-        elif mtype == "text":
-            body = msg["text"]["body"].lower()
-            if "generar" in body or "reporte" in body:
-                datos = sessions[from_num].get("datos")
-                fotos = sessions[from_num].get("fotos", [])
-                if not datos:
-                    send_whatsapp(from_num, "❌ Primero manda el audio diciendo fecha, empresa y trabajo realizado.")
-                    return PlainTextResponse("ok", 200)
-
-                nombre = f"Reporte_{datos.get('empresa','Cliente').replace(' ','_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-                out_path = f"/tmp/{nombre}"
-                generar_pptx(datos, fotos, out_path)
-                enviar_correo(out_path, datos)
-                send_document(from_num, out_path)
-                send_whatsapp(from_num, f"✅ Reporte generado y enviado a {os.getenv('REPORT_EMAIL')} con {len(fotos)} fotos.")
-                sessions[from_num] = {"fotos": [], "datos": {}} # limpiar
-            else:
-                send_whatsapp(from_num, "👋 Envía un audio con: fecha, empresa y trabajo realizado para empezar.")
-
+            path = download_media(msg["image"]["id"])
+            sessions[from_num]["fotos"].append(path)
+            send_whatsapp(from_num, f"📸 Foto {len(sessions[from_num]['fotos'])} de {sessions[from_num].get('nombre','')} guardada.")
+        elif mtype == "text" and "generar" in msg["text"]["body"].lower():
+            datos = sessions[from_num].get("datos")
+            fotos = sessions[from_num].get("fotos", [])
+            if not datos:
+                send_whatsapp(from_num, "Primero manda audio.")
+                return PlainTextResponse("ok", 200)
+            out = f"/tmp/Reporte_{datos.get('empresa','').replace(' ','_')}_{datos.get('tecnico','').replace(' ','_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
+            generar_pptx(datos, fotos, out)
+            enviar_correo(out, datos)
+            send_document(from_num, out)
+            send_whatsapp(from_num, f"✅ Reporte de {datos.get('tecnico')} enviado a {os.getenv('REPORT_EMAIL')}")
+            sessions[from_num] = {"fotos": [], "datos": {}, "nombre": ""}
     except Exception as e:
-        print(f"Error webhook: {e}")
+        print(f"Error: {e}")
     return PlainTextResponse("ok", 200)
 
 @app.get("/")
-def home():
-    return {"status": "online", "template": TEMPLATE_PATH, "sessions": len(sessions)}
-
+def home(): return {"status":"online"}
 @app.get("/privacy")
-def privacy():
-    return PlainTextResponse("Política de privacidad Automatyco: Uso interno para generación de reportes técnicos.")
-
+def privacy(): return PlainTextResponse("Politica privacidad Automatyco")
 @app.get("/terms")
-def terms():
-    return PlainTextResponse("Términos Automatyco - Uso interno.")
+def terms(): return PlainTextResponse("Terminos Automatyco")
