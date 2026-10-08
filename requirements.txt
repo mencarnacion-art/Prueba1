@@ -1,6 +1,14 @@
 fastapi
-uvicorn
+uvicorn[standard]
+requests
 openai
 python-pptx
-requests
-python-multipart
+
+
+#funcionan con mensaje
+#fastapi
+#uvicorn
+#openai
+#python-pptx
+#requests
+#python-multipart
