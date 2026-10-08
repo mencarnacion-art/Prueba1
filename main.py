@@ -54,16 +54,18 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH) if os.path.exists(TEMPLATE_PATH) else Presentation()
 
-    # 1. Portada
-    for shape in prs.slides[0].shapes:
+    # 1. Portada - sin romper formato
+    first_slide = prs.slides[0]
+    for shape in first_slide.shapes:
         replace_keep_format(shape,"{Empresa}",empresa)
         replace_keep_format(shape,"{EMPRESA}",empresa)
         replace_keep_format(shape,"{TECNICO}",tecnico)
         replace_keep_format(shape,"{Tecnico}",tecnico)
         replace_keep_format(shape,"{FECHA}",fecha)
 
-    # 2. Rellenar {TRABAJO}
-    for slide in prs.slides[1:]:
+    # 2. Rellenar {TRABAJO} - CORREGIDO sin slice
+    all_slides = list(prs.slides)
+    for slide in all_slides[1:]: # ahora si es lista Python normal
         for shape in slide.shapes:
             if shape.has_text_frame and "{TRABAJO}" in shape.text:
                 for p in shape.text_frame.paragraphs:
@@ -71,39 +73,46 @@ def create_pptx(texts, images):
                         if "{TRABAJO}" in run.text:
                             run.text=run.text.replace("{TRABAJO}", trabajo)
 
-    # 3. Fotos - truco sin bug: sacamos la ultima slide, agregamos fotos, y regresamos la ultima
-    if len(prs.slides) > 1 and len(images) > 0:
-        sldIdLst = prs.slides._sldIdLst
-        last_sldId = sldIdLst[-1]
-        sldIdLst.remove(last_sldId) # quitamos cierre temporalmente
+    # 3. Fotos - SIN mover _sldIdLst para no romper, solo usamos slides vacías y agregamos al final
+    # Guardamos cuantas slides tenía originalmente
+    original_count = len(prs.slides)
+    img_idx = 0
 
-        layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
-
-        # primero intenta usar slides vacias que ya existen (del 2 en adelante)
-        img_idx = 0
-        for i in range(2, len(prs.slides)):
-            if img_idx >= len(images): break
-            slide = prs.slides[i]
-            if len(slide.shapes) < 2: # probablemente vacia (solo header/footer de tu plantilla)
-                try:
-                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-                        tf.write(images[img_idx]); path=tf.name
-                    slide.shapes.add_picture(path, Inches(0.5), Inches(0.9), Inches(12), Inches(5.8))
-                    os.unlink(path)
-                    img_idx+=1
-                except: pass
-
-        # resto de fotos en slides nuevas
-        while img_idx < len(images):
-            s = prs.slides.add_slide(layout)
+    # Usa slides 2,3,etc que estén vacías (tu plantilla tiene 2 slides vacías)
+    for idx in range(2, original_count):
+        if img_idx >= len(images): break
+        slide = prs.slides[idx]
+        # si ya es la de trabajo, skip
+        if any("{TRABAJO}" in s.text for s in slide.shapes if s.has_text_frame):
+            continue
+        # si no tiene ya foto, ponle
+        try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
                 tf.write(images[img_idx]); path=tf.name
-            s.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(12), Inches(6.2))
+            slide.shapes.add_picture(path, Inches(0.5), Inches(0.9), Inches(12), Inches(5.8))
             os.unlink(path)
             img_idx+=1
+        except Exception as e:
+            print(e)
 
-        # regresamos la ultima al final
-        sldIdLst.append(last_sldId)
+    # Resto de fotos como slides nuevas al final
+    layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
+    while img_idx < len(images):
+        s = prs.slides.add_slide(layout)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            tf.write(images[img_idx]); path=tf.name
+        s.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(12), Inches(6.2))
+        os.unlink(path)
+        img_idx+=1
+
+    # 4. Mover la ultima original al final si se agregaron nuevas (forma segura)
+    if len(prs.slides) > original_count:
+        sldIdLst = prs.slides._sldIdLst
+        # la original ultima era la del index original_count-1, ahora está en medio
+        # la movemos al final de verdad
+        original_last = sldIdLst[original_count-1]
+        sldIdLst.remove(original_last)
+        sldIdLst.append(original_last)
 
     bio=io.BytesIO(); prs.save(bio); bio.seek(0); return bio.getvalue()
 
