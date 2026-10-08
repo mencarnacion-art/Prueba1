@@ -4,7 +4,6 @@ requests
 openai
 python-pptx
 
-
 #funcionan con mensaje
 #fastapi
 #uvicorn
