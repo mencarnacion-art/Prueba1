@@ -24,8 +24,7 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    print(f"UPLOAD {r.status_code} {r.text[:500]}")
-    if r.status_code != 200: return
+    if r.status_code!= 200: print(r.text); return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -38,33 +37,36 @@ def limpiar_markdown(t):
     return t.strip()
 
 def mejorar_texto(texto_raw, empresa):
-    texto_raw = texto_raw[:6000]
-    # 1. Modelos que Google TE OBLIGA a usar ahora (según tu log)
+    texto_raw = texto_raw[:8000]
+    # EL BUENO ES EL FLASH-PREVIEW - ES EL QUE TE DIO 200 OK
     modelos_google = [
-        "models/gemini-3.1-pro-preview",
-        "models/gemini-3-pro-preview",
-        "models/gemini-3-flash-preview",
-        "models/gemini-3.1-flash-preview",
-        "models/gemini-2.5-flash",
+        "models/gemini-3-flash-preview", # ESTE ES EL QUE FUNCIONA GRATIS
         "models/gemini-2.5-flash-lite",
         "models/gemini-2.5-flash-lite-preview-06-17",
+        "models/gemini-2.5-flash",
+        "models/gemini-flash-latest",
     ]
     if GOOGLE_API_KEY:
         for modelo in modelos_google:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/{modelo}:generateContent?key={GOOGLE_API_KEY}"
                 payload = {
-                    "contents": [{"parts": [{"text": f"Redacta profesional, texto plano, prohibido usar ** o ##. Cliente {empresa}: {texto_raw}"}]}],
-                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000}
+                    "contents": [{"parts": [{"text": f"Eres asistente técnico de Automatyco. Redacta el siguiente reporte de trabajo de forma profesional, completa y detallada, sin cortar, sin usar **, sin ##, sin markdown, solo texto plano en párrafos. No resumas demasiado, respeta todo el contenido. Cliente {empresa}: {texto_raw}"}]}],
+                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192}
                 }
-                r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=30)
+                r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=40)
                 print(f"GEMINI {modelo}: {r.status_code}")
                 if r.status_code == 200:
-                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    print(f"GEMINI OK con {modelo}")
+                    data = r.json()
+                    txt = data["candidates"][0]["content"]["parts"][0]["text"]
+                    # Si hay más partes, las juntamos
+                    parts = data["candidates"][0]["content"]["parts"]
+                    if len(parts) > 1:
+                        txt = "\n".join([p["text"] for p in parts])
+                    print(f"GEMINI OK {len(txt)} chars con {modelo}")
                     return limpiar_markdown(txt)
                 else:
-                    print(r.text[:800])
+                    print(r.text[:1000])
             except Exception as e:
                 print(f"ERR {modelo}: {e}")
 
@@ -72,13 +74,11 @@ def mejorar_texto(texto_raw, empresa):
         try:
             r = requests.post("https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"},
-                json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Redacta profesional sin ** cliente {empresa}: {texto_raw}"}]}, timeout=20)
-            print(f"OPENAI {r.status_code}")
+                json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Redacta reporte técnico completo sin ** cliente {empresa}: {texto_raw}"}], "max_tokens": 4000}, timeout=25)
             if r.status_code == 200:
                 return limpiar_markdown(r.json()["choices"][0]["message"]["content"])
-        except Exception as e: print(e)
+        except: pass
 
-    print("SIN IA - uso texto limpio")
     return limpiar_markdown(texto_raw)
 
 def replace_keep_format(shape, placeholder, value):
@@ -124,7 +124,8 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{TECNICO}", tecnico)
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
-    paginas = [trabajo[i:i+900] for i in range(0, len(trabajo), 900)] if len(trabajo) > 900 else [trabajo]
+    # Ahora pagina a 1200 chars para no cortar tanto
+    paginas = [trabajo[i:i+1200] for i in range(0, len(trabajo), 1200)] if len(trabajo) > 1200 else [trabajo]
     for shape in prs.slides[1].shapes:
         if shape.has_text_frame and "{TRABAJO}" in shape.text:
             shape.text_frame.word_wrap = True
@@ -156,18 +157,15 @@ def create_pptx(texts, images):
 
 @app.get("/")
 def home(): return {"ok": True}
-
 @app.get("/debug/models")
 def debug_models():
-    if not GOOGLE_API_KEY: return {"error": "no GOOGLE_API_KEY"}
+    if not GOOGLE_API_KEY: return {"error": "no key"}
     r = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GOOGLE_API_KEY}")
     return r.json()
-
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
     if hub_verify_token == VERIFY_TOKEN: return int(hub_challenge)
     return "Token invalido"
-
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
@@ -182,7 +180,7 @@ async def webhook(req: Request):
                 sess = SESSIONS.get(frm, {"texts":[],"images":[]})
                 if not sess["texts"] and not sess["images"]:
                     send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, "Generando reporte...")
+                send_text(frm, "Generando reporte completo...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
                 SESSIONS[frm] = {"texts":[],"images":[]}
