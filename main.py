@@ -9,15 +9,14 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID") or os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN") or "automatyco123"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSIONS = {}
 TEMPLATE_PATH = "Reporte.pptx"
 
 def send_text(to, text):
-    try:
-        requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
-            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
-            json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body": text[:3500]}})
-    except: pass
+    requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
+        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
+        json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body": text[:3500]}})
 
 def send_doc(to, pptx_bytes, filename):
     h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -25,7 +24,6 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    print("MEDIA", r.status_code)
     if r.status_code != 200: print(r.text); return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
@@ -36,25 +34,34 @@ def limpiar_markdown(t):
     if not t: return ""
     t = re.sub(r'\*\*(.*?)\*\*', r'\1', t)
     t = re.sub(r'[*_`#]', '', t)
-    t = re.sub(r'^---+$', '', t, flags=re.MULTILINE)
     return t.strip()
 
-def mejorar_con_gemini(texto_raw, empresa):
-    if not GOOGLE_API_KEY: return None
-    modelos = ["gemini-2.5-flash", "gemini-2.5-flash-latest", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    for modelo in modelos:
+def mejorar_texto(texto_raw, empresa):
+    # 1. Intenta OpenAI si lo tienes
+    if OPENAI_API_KEY:
         try:
-            prompt = f"Redacta profesional en texto plano sin ** ni ##, cliente {empresa}: {texto_raw[:6000]}"
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GOOGLE_API_KEY}"
-            r = requests.post(url, headers={"Content-Type":"application/json"},
-                json={"contents":[{"parts":[{"text":prompt}]}], "generationConfig":{"temperature":0.2}}, timeout=25)
-            print(f"GEMINI {modelo}: {r.status_code}")
+            r = requests.post("https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"},
+                json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Redacta reporte técnico cliente {empresa} en texto plano sin ** ni ##: {texto_raw[:6000]}"}]},
+                timeout=20)
             if r.status_code == 200:
-                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return limpiar_markdown(txt)
-        except Exception as e:
-            print(e)
-    return None
+                print("OPENAI OK")
+                return limpiar_markdown(r.json()["choices"][0]["message"]["content"])
+        except Exception as e: print(f"OPENAI ERR {e}")
+
+    # 2. Intenta Gemini 3.8 (el único que deja a usuarios nuevos)
+    if GOOGLE_API_KEY:
+        for modelo in ["gemini-3.8-flash","gemini-2.5-flash","gemini-2.0-flash"]:
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GOOGLE_API_KEY}"
+                payload = {"contents":[{"parts":[{"text": f"Redacta en texto plano sin ** cliente {empresa}: {texto_raw[:5000]}"}]}]}
+                r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=20)
+                print(f"GEMINI {modelo}: {r.status_code}")
+                if r.status_code == 200:
+                    return limpiar_markdown(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except: pass
+    print("SIN IA - uso texto original limpio")
+    return limpiar_markdown(texto_raw)
 
 def replace_keep_format(shape, placeholder, value):
     if not shape.has_text_frame: return
@@ -80,8 +87,7 @@ def parse_data(texts):
     desc = re.sub(r'Empresa\s*:.*\n?', '', full, flags=re.IGNORECASE)
     desc = re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?', '', desc, flags=re.IGNORECASE).strip()
     if not desc: desc = full
-    mejorado = mejorar_con_gemini(desc, empresa)
-    final = limpiar_markdown(mejorado) if mejorado else limpiar_markdown(desc)
+    final = mejorar_texto(desc, empresa)
     return empresa, tecnico, fecha_file, fecha_show, final
 
 def add_slide_before_last(prs, layout):
@@ -94,27 +100,22 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
     layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
-
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
         replace_keep_format(shape, "{TECNICO}", tecnico)
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
-
     paginas = [trabajo[i:i+900] for i in range(0, len(trabajo), 900)] if len(trabajo) > 900 else [trabajo]
-    
     for shape in prs.slides[1].shapes:
         if shape.has_text_frame and "{TRABAJO}" in shape.text:
             shape.text_frame.word_wrap = True
             replace_keep_format(shape, "{TRABAJO}", paginas[0])
-
     for extra in paginas[1:]:
         ns = add_slide_before_last(prs, layout)
         txBox = ns.shapes.add_textbox(Inches(0.5), Inches(0.8), Inches(9), Inches(5.5))
         txBox.text_frame.word_wrap = True
         txBox.text_frame.text = extra
-
     img_idx = 0
     for sld in list(prs.slides)[2:-1]:
         if img_idx >= len(images): break
@@ -125,20 +126,26 @@ def create_pptx(texts, images):
             tf.write(images[img_idx]); path = tf.name
         sld.shapes.add_picture(path, Inches(0.5), Inches(1.0), Inches(9), Inches(5))
         os.unlink(path); img_idx += 1
-
     while img_idx < len(images):
         ns = add_slide_before_last(prs, layout)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             tf.write(images[img_idx]); path = tf.name
         ns.shapes.add_picture(path, Inches(0.5), Inches(1.0), Inches(9), Inches(5))
         os.unlink(path); img_idx += 1
-
     bio = io.BytesIO(); prs.save(bio); bio.seek(0)
     safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
 
 @app.get("/")
-def home(): return {"ok": True}
+def home(): return {"ok": True, "endpoints": ["/debug/models", "/webhook"]}
+
+@app.get("/debug/models")
+def debug_models():
+    if not GOOGLE_API_KEY: return {"error": "no GOOGLE_API_KEY en Railway Variables"}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GOOGLE_API_KEY}"
+    r = requests.get(url)
+    try: return r.json()
+    except: return {"status": r.status_code, "text": r.text[:1000]}
 
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
@@ -159,7 +166,7 @@ async def webhook(req: Request):
                 sess = SESSIONS.get(frm, {"texts":[],"images":[]})
                 if not sess["texts"] and not sess["images"]:
                     send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, f"Generando {len(sess['texts'])} textos y {len(sess['images'])} fotos...")
+                send_text(frm, f"Generando reporte...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
                 SESSIONS[frm] = {"texts":[],"images":[]}
