@@ -31,25 +31,32 @@ def send_doc(to, pptx_bytes, filename):
 
 def mejorar_con_gemini(texto_raw, empresa):
     if not GOOGLE_API_KEY: return None
-    try:
-        prompt = f"""Eres redactor técnico senior de Automatyco. Corrige ortografía, gramática y redacta 100% profesional este reporte del cliente {empresa}. No te limites a una sola estructura, adapta según el texto:
+    # Modelos válidos 2026: gemini-2.0-flash es el estable gratis
+    models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"]
+    for model in models_to_try:
+        try:
+            prompt = f"""Eres redactor técnico senior de Automatyco. Corrige ortografía, gramática y redacta 100% profesional este reporte del cliente {empresa}.
+No te limites a una sola estructura, adapta según el texto:
 - Si es instalación con problemas: Resumen Ejecutivo, Bitácora de Eventos con horas e incidencias, Plan de Acción.
 - Si es mantenimiento: Objetivo, Trabajo Realizado, Hallazgos, Conclusión.
-Usa lenguaje formal, técnico.
+Usa lenguaje formal, técnico, en español.
 
 Texto del técnico:
 {texto_raw}
 
-Devuelve SOLO el texto mejorado en español, listo para PPT."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
-        r = requests.post(url, headers={"Content-Type":"application/json"},
-                          json={"contents":[{"parts":[{"text":prompt}]}]}, timeout=30)
-        print("GEMINI:", r.status_code)
-        if r.status_code==200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        print(r.text[:1000])
-    except Exception as e:
-        print(f"GEMINI ERROR: {e}")
+Devuelve SOLO el texto mejorado listo para PPT."""
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GOOGLE_API_KEY}"
+            r = requests.post(url, headers={"Content-Type":"application/json"},
+                              json={"contents":[{"parts":[{"text":prompt}]}]}, timeout=30)
+            print(f"GEMINI {model}: {r.status_code}")
+            if r.status_code==200:
+                data=r.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                print(r.text[:800])
+        except Exception as e:
+            print(f"GEMINI ERROR {model}: {e}")
+            continue
     return None
 
 def mejorar_con_openai(texto_raw, empresa):
@@ -59,11 +66,16 @@ def mejorar_con_openai(texto_raw, empresa):
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
             json={"model":"gpt-4o-mini","messages":[{"role":"user","content":f"Redacta profesional reporte de {empresa}: {texto_raw}"}],"temperature":0.2}, timeout=20)
         if r.status_code==200: return r.json()["choices"][0]["message"]["content"]
-    except: pass
+        print("OPENAI:", r.text[:500])
+    except Exception as e: print(e)
     return None
 
 def corregir(texto_raw, empresa):
-    return mejorar_con_openai(texto_raw, empresa) or mejorar_con_gemini(texto_raw, empresa) or texto_raw
+    res = mejorar_con_openai(texto_raw, empresa)
+    if res: return res
+    res = mejorar_con_gemini(texto_raw, empresa)
+    if res: return res
+    return texto_raw
 
 def parse_data(texts):
     full="\n".join(texts)
@@ -76,6 +88,7 @@ def parse_data(texts):
     fecha_show=datetime.now().strftime("%d/%m/%Y")
     desc=re.sub(r'Empresa\s*:.*\n?','',full,flags=re.IGNORECASE)
     desc=re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?','',desc,flags=re.IGNORECASE).strip()
+    if not desc: desc=full
     return empresa, tecnico, fecha_file, fecha_show, corregir(desc, empresa)
 
 def add_slide_before_last(prs, layout):
@@ -93,8 +106,8 @@ def create_pptx(texts, images):
         if shape.has_text_frame:
             if "{Empresa}" in shape.text: shape.text=shape.text.replace("{Empresa}",empresa)
             if "{EMPRESA}" in shape.text: shape.text=shape.text.replace("{EMPRESA}",empresa)
-            if "{TECNICO}" in shape.text or "{Tecnico}" in shape.text:
-                shape.text=shape.text.replace("{TECNICO}",tecnico).replace("{Tecnico}",tecnico)
+            if "{TECNICO}" in shape.text: shape.text=shape.text.replace("{TECNICO}",tecnico)
+            if "{Tecnico}" in shape.text: shape.text=shape.text.replace("{Tecnico}",tecnico)
             if "{FECHA}" in shape.text: shape.text=shape.text.replace("{FECHA}",fecha_show)
 
     for slide in list(prs.slides)[1:-1]:
@@ -107,10 +120,12 @@ def create_pptx(texts, images):
         if img_idx>=len(images): break
         slide=prs.slides[i]
         if any(s.shape_type==13 for s in slide.shapes): continue
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tf.write(images[img_idx]); path=tf.name
-        slide.shapes.add_picture(path, Inches(0.5), Inches(1.2), Inches(12.3), Inches(5.3))
-        os.unlink(path); img_idx+=1
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                tf.write(images[img_idx]); path=tf.name
+            slide.shapes.add_picture(path, Inches(0.5), Inches(1.2), Inches(12.3), Inches(5.3))
+            os.unlink(path); img_idx+=1
+        except Exception as e: print(e)
 
     while img_idx < len(images):
         s = add_slide_before_last(prs, layout)
@@ -142,7 +157,7 @@ async def webhook(req: Request):
             body=msg["text"]["body"].strip()
             if body.lower() in ["generar reporte","generar","reporte"]:
                 sess=SESSIONS[from_num]
-                send_text(from_num, f"Consultando Gemini y armando {len(sess['images'])} fotos...")
+                send_text(from_num, f"Consultando Gemini 2.0 y armando {len(sess['images'])} fotos...")
                 pptx_bytes, filename = create_pptx(sess["texts"], sess["images"])
                 send_doc(from_num, pptx_bytes, filename=filename)
                 SESSIONS[from_num]={"texts":[],"images":[]}
