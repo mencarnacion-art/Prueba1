@@ -24,8 +24,8 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    print(f"UPLOAD {r.status_code}")
-    if r.status_code != 200: print(r.text); return
+    print(f"UPLOAD {r.status_code} {r.text[:500]}")
+    if r.status_code != 200: return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -35,16 +35,28 @@ def limpiar_markdown(t):
     if not t: return ""
     t = re.sub(r'\*\*(.*?)\*\*', r'\1', t)
     t = re.sub(r'[*_`#]', '', t)
-    t = re.sub(r'^---+$', '', t, flags=re.MULTILINE)
     return t.strip()
 
 def mejorar_texto(texto_raw, empresa):
-    # 1. Gemini 2.5 Flash - EL QUE TU KEY SI TIENE (visto en tu debug)
+    texto_raw = texto_raw[:6000]
+    # 1. Modelos que Google TE OBLIGA a usar ahora (según tu log)
+    modelos_google = [
+        "models/gemini-3.1-pro-preview",
+        "models/gemini-3-pro-preview",
+        "models/gemini-3-flash-preview",
+        "models/gemini-3.1-flash-preview",
+        "models/gemini-2.5-flash",
+        "models/gemini-2.5-flash-lite",
+        "models/gemini-2.5-flash-lite-preview-06-17",
+    ]
     if GOOGLE_API_KEY:
-        for modelo in ["models/gemini-2.5-flash", "models/gemini-2.5-flash-lite", "models/gemini-2.5-pro"]:
+        for modelo in modelos_google:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/{modelo}:generateContent?key={GOOGLE_API_KEY}"
-                payload = {"contents":[{"parts":[{"text": f"Eres redactor técnico de Automatyco. Redacta profesional, sin usar **, sin ##, solo texto plano. Cliente {empresa}: {texto_raw[:6000]}"}]}], "generationConfig":{"temperature":0.2, "maxOutputTokens":2000}}
+                payload = {
+                    "contents": [{"parts": [{"text": f"Redacta profesional, texto plano, prohibido usar ** o ##. Cliente {empresa}: {texto_raw}"}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000}
+                }
                 r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=30)
                 print(f"GEMINI {modelo}: {r.status_code}")
                 if r.status_code == 200:
@@ -52,16 +64,16 @@ def mejorar_texto(texto_raw, empresa):
                     print(f"GEMINI OK con {modelo}")
                     return limpiar_markdown(txt)
                 else:
-                    print(r.text[:1000])
+                    print(r.text[:800])
             except Exception as e:
                 print(f"ERR {modelo}: {e}")
 
-    # 2. Fallback OpenAI si lo tienes
     if OPENAI_API_KEY:
         try:
             r = requests.post("https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"},
-                json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Redacta profesional sin ** cliente {empresa}: {texto_raw[:6000]}"}]}, timeout=20)
+                json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Redacta profesional sin ** cliente {empresa}: {texto_raw}"}]}, timeout=20)
+            print(f"OPENAI {r.status_code}")
             if r.status_code == 200:
                 return limpiar_markdown(r.json()["choices"][0]["message"]["content"])
         except Exception as e: print(e)
@@ -106,27 +118,22 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
     layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
-
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
         replace_keep_format(shape, "{TECNICO}", tecnico)
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
-
     paginas = [trabajo[i:i+900] for i in range(0, len(trabajo), 900)] if len(trabajo) > 900 else [trabajo]
-    
     for shape in prs.slides[1].shapes:
         if shape.has_text_frame and "{TRABAJO}" in shape.text:
             shape.text_frame.word_wrap = True
             replace_keep_format(shape, "{TRABAJO}", paginas[0])
-
     for extra in paginas[1:]:
         ns = add_slide_before_last(prs, layout)
         txBox = ns.shapes.add_textbox(Inches(0.5), Inches(0.8), Inches(9), Inches(5.5))
         txBox.text_frame.word_wrap = True
         txBox.text_frame.text = extra
-
     img_idx = 0
     for sld in list(prs.slides)[2:-1]:
         if img_idx >= len(images): break
@@ -137,14 +144,12 @@ def create_pptx(texts, images):
             tf.write(images[img_idx]); path = tf.name
         sld.shapes.add_picture(path, Inches(0.5), Inches(1.0), Inches(9), Inches(5))
         os.unlink(path); img_idx += 1
-
     while img_idx < len(images):
         ns = add_slide_before_last(prs, layout)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             tf.write(images[img_idx]); path = tf.name
         ns.shapes.add_picture(path, Inches(0.5), Inches(1.0), Inches(9), Inches(5))
         os.unlink(path); img_idx += 1
-
     bio = io.BytesIO(); prs.save(bio); bio.seek(0)
     safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
