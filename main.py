@@ -23,7 +23,9 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    if r.status_code!= 200: print(r.text); return
+    if r.status_code!= 200: 
+        print(r.text)
+        return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -33,7 +35,8 @@ def limpiar_markdown(t):
     return re.sub(r'[*_`#]', '', t).strip() if t else ""
 
 def mejorar_texto_profesional(texto_raw, empresa):
-    if not texto_raw: return texto_raw
+    if not texto_raw: 
+        return texto_raw
     partes = [texto_raw[i:i+3500] for i in range(0, len(texto_raw), 3500)]
     resultado = ""
     for parte in partes:
@@ -52,14 +55,16 @@ def mejorar_texto_profesional(texto_raw, empresa):
                     if len(txt) >= len(parte)*0.6:
                         corregida = txt
             except Exception as e:
-                print(e)
+                print(f"Error Gemini: {e}")
         resultado += " " + corregida
     print(f"TEXTO FINAL CORREGIDO {len(resultado)} chars")
     return limpiar_markdown(resultado)
 
 def replace_keep_format(shape, placeholder, value):
-    if not shape.has_text_frame: return
-    if placeholder not in shape.text: return
+    if not shape.has_text_frame: 
+        return
+    if placeholder not in shape.text: 
+        return
     for para in shape.text_frame.paragraphs:
         if placeholder in para.text:
             for run in para.runs:
@@ -76,9 +81,11 @@ def dividir_inteligente(texto, max_chars=850):
         if len(actual) + len(o) + 1 < max_chars:
             actual = (actual + " " + o).strip() if actual else o
         else:
-            if actual: paginas.append(actual.strip())
+            if actual: 
+                paginas.append(actual.strip())
             actual = o
-    if actual: paginas.append(actual.strip())
+    if actual: 
+        paginas.append(actual.strip())
     return paginas
 
 def delete_slide(prs, index):
@@ -88,16 +95,20 @@ def delete_slide(prs, index):
 
 def parse_data(texts):
     full = "\n".join(texts)
-    empresa = "CLIENTE"; tecnico = "TECNICO"
+    empresa = "CLIENTE"
+    tecnico = "TECNICO"
     m = re.search(r'Empresa\s*:\s*(.+)', full, re.IGNORECASE)
-    if m: empresa = m.group(1).split("\n")[0].strip()
+    if m: 
+        empresa = m.group(1).split("\n")[0].strip()
     m2 = re.search(r'(Tecnico|Técnico|By)\s*:\s*(.+)', full, re.IGNORECASE)
-    if m2: tecnico = m2.group(2).split("\n")[0].strip()
+    if m2: 
+        tecnico = m2.group(2).split("\n")[0].strip()
     fecha_file = datetime.now().strftime("%Y-%m-%d")
     fecha_show = datetime.now().strftime("%d/%m/%Y")
     desc = re.sub(r'Empresa\s*:.*\n?', '', full, flags=re.IGNORECASE)
     desc = re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?', '', desc, flags=re.IGNORECASE).strip()
-    if not desc: desc = full
+    if not desc: 
+        desc = full
     final = mejorar_texto_profesional(desc, empresa)
     return empresa, tecnico, fecha_file, fecha_show, final
 
@@ -114,16 +125,22 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
     # Dejamos solo 1 y 6 para reconstruir orden correcto
+    print(f"Slides originales: {len(prs.slides)}")
     while len(prs.slides) > 2:
         delete_slide(prs, 1)
+    print(f"Slides tras limpieza: {len(prs.slides)}")
 
-    layout_text = prs.slide_layouts[1]
-    layout_blank = prs.slide_layouts[6]
+    # FIX ERROR: slide layout index out of range
+    total_layouts = len(prs.slide_layouts)
+    layout_text = prs.slide_layouts[1] if total_layouts > 1 else prs.slide_layouts[0]
+    layout_blank = prs.slide_layouts[6] if total_layouts > 6 else prs.slide_layouts[-1]
+    
     paginas = dividir_inteligente(trabajo, 850)
-    print(f"PAGINAS TEXTO: {len(paginas)} - FOTOS: {len(images)}")
+    print(f"Layouts disponibles: {total_layouts} - PAGINAS TEXTO: {len(paginas)} - FOTOS: {len(images)}")
     sldLst = prs.slides._sldIdLst
 
-    # Diapositiva 2 y 3: Texto - Se agregan las que sean necesarias
+    # Diapositiva 2: Texto corregido profesional - parte 1
+    # Diapositiva 3: Texto corregido - continuación (se agregan las que sean necesarias)
     for idx, pagina in enumerate(paginas):
         ns = prs.slides.add_slide(layout_text)
         txBox = ns.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(9), Inches(6))
@@ -133,29 +150,40 @@ def create_pptx(texts, images):
         sldLst.remove(new_id)
         sldLst.insert(1 + idx, new_id)
 
-    # Diapositiva 4 y 5: Fotos - Se agregan las que sean necesarias
+    # Diapositiva 4: Foto 1
+    # Diapositiva 5: Foto 2 (Se agregan las que sean necesarias)
     for img_bytes in images:
-        if len(img_bytes) < 20000: continue
+        if len(img_bytes) < 20000: 
+            continue
         ns = prs.slides.add_slide(layout_blank)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tf.write(img_bytes); path = tf.name
-        ns.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
+            tf.write(img_bytes)
+            path = tf.name
+        try:
+            ns.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
+        except Exception as e:
+            print(f"Error foto: {e}")
         os.unlink(path)
         new_id = sldLst[-1]
         sldLst.remove(new_id)
         sldLst.insert(len(sldLst)-1, new_id)
 
-    print(f"Slides finales: {len(prs.slides)} = 1 encabezado + {len(paginas)} texto + {len(images)} fotos + 1 gracias")
-    bio = io.BytesIO(); prs.save(bio); bio.seek(0)
+    # Diapositiva 6: Gracias (sin tocar)
+    print(f"Slides finales: {len(prs.slides)}")
+    bio = io.BytesIO()
+    prs.save(bio)
+    bio.seek(0)
     safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
 
 @app.get("/")
-def home(): return {"ok": True, "estructura": "1-Encabezado 2-Texto 3-Texto... N-Fotos 6-Gracias"}
+def home(): 
+    return {"ok": True, "estructura": "1-Encabezado 2-Texto 3-Texto... N-Fotos 6-Gracias"}
 
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
-    if hub_verify_token == VERIFY_TOKEN: return int(hub_challenge)
+    if hub_verify_token == VERIFY_TOKEN: 
+        return int(hub_challenge)
     return "Token invalido"
 
 @app.post("/webhook")
@@ -163,16 +191,19 @@ async def webhook(req: Request):
     data = await req.json()
     try:
         v = data["entry"][0]["changes"][0]["value"]
-        if "statuses" in v or "messages" not in v: return "ok"
-        msg = v["messages"][0]; frm = msg["from"]
+        if "statuses" in v or "messages" not in v: 
+            return "ok"
+        msg = v["messages"][0]
+        frm = msg["from"]
         SESSIONS.setdefault(frm, {"texts":[],"images":[]})
         if msg["type"] == "text":
             body = msg["text"]["body"].strip()
             if body.lower() in ["generar reporte","generar","reporte"]:
                 sess = SESSIONS.get(frm, {"texts":[],"images":[]})
                 if not sess["texts"] and not sess["images"]:
-                    send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, f"Generando reporte con {len(sess['images'])} fotos...")
+                    send_text(frm, "No tengo datos")
+                    return "ok"
+                send_text(frm, f"Generando reporte con {len(sess['texts'])} textos y {len(sess['images'])} fotos...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
                 SESSIONS[frm] = {"texts":[],"images":[]}
@@ -180,11 +211,14 @@ async def webhook(req: Request):
                 SESSIONS[frm]["texts"].append(body)
                 send_text(frm, "Guardado ✅")
         elif msg["type"] == "image":
-            mid = msg["image"]["id"]; h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            mid = msg["image"]["id"]
+            h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             info = requests.get(f"https://graph.facebook.com/v20.0/{mid}", headers=h, timeout=15).json()
             img = requests.get(info["url"], headers=h, timeout=20).content
             SESSIONS[frm]["images"].append(img)
             send_text(frm, f"Foto {len(SESSIONS[frm]['images'])} guardada")
     except Exception as e:
-        print(e); import traceback; traceback.print_exc()
+        print(e)
+        import traceback
+        traceback.print_exc()
     return "ok"
