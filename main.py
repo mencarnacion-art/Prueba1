@@ -23,7 +23,9 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    if r.status_code!= 200: print(r.text); return
+    if r.status_code!= 200:
+        print(r.text)
+        return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -33,7 +35,8 @@ def limpiar_markdown(t):
     return re.sub(r'[*_`#]', '', t).strip() if t else ""
 
 def mejorar_texto_profesional(texto_raw, empresa):
-    if not texto_raw: return texto_raw
+    if not texto_raw:
+        return texto_raw
     partes = [texto_raw[i:i+3500] for i in range(0, len(texto_raw), 3500)]
     resultado = ""
     for parte in partes:
@@ -46,18 +49,22 @@ def mejorar_texto_profesional(texto_raw, empresa):
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}
                 }
                 r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=40)
+                print(f"GEMINI {r.status_code} parte {len(parte)}")
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    if len(txt) >= len(parte)*0.6:
+                    if len(txt) >= len(parte) * 0.6:
                         corregida = txt
             except Exception as e:
-                print(e)
+                print(f"Error Gemini: {e}")
         resultado += " " + corregida
+    print(f"TEXTO FINAL CORREGIDO {len(resultado)} chars")
     return limpiar_markdown(resultado)
 
 def replace_keep_format(shape, placeholder, value):
-    if not shape.has_text_frame: return
-    if placeholder not in shape.text: return
+    if not shape.has_text_frame:
+        return
+    if placeholder not in shape.text:
+        return
     for para in shape.text_frame.paragraphs:
         if placeholder in para.text:
             for run in para.runs:
@@ -74,9 +81,11 @@ def dividir_inteligente(texto, max_chars=850):
         if len(actual) + len(o) + 1 < max_chars:
             actual = (actual + " " + o).strip() if actual else o
         else:
-            if actual: paginas.append(actual.strip())
+            if actual:
+                paginas.append(actual.strip())
             actual = o
-    if actual: paginas.append(actual.strip())
+    if actual:
+        paginas.append(actual.strip())
     return paginas
 
 def delete_slide(prs, index):
@@ -85,7 +94,7 @@ def delete_slide(prs, index):
     del prs.slides._sldIdLst[index]
 
 def clear_placeholders(slide):
-    # FIX texto sobreencimado - borra "Haga clic para agregar titulo"
+    # FIX: elimina "Haga clic para agregar titulo"
     for shape in list(slide.shapes):
         if shape.is_placeholder:
             sp = shape._element
@@ -93,16 +102,20 @@ def clear_placeholders(slide):
 
 def parse_data(texts):
     full = "\n".join(texts)
-    empresa = "CLIENTE"; tecnico = "TECNICO"
+    empresa = "CLIENTE"
+    tecnico = "TECNICO"
     m = re.search(r'Empresa\s*:\s*(.+)', full, re.IGNORECASE)
-    if m: empresa = m.group(1).split("\n")[0].strip()
+    if m:
+        empresa = m.group(1).split("\n")[0].strip()
     m2 = re.search(r'(Tecnico|Técnico|By)\s*:\s*(.+)', full, re.IGNORECASE)
-    if m2: tecnico = m2.group(2).split("\n")[0].strip()
+    if m2:
+        tecnico = m2.group(2).split("\n")[0].strip()
     fecha_file = datetime.now().strftime("%Y-%m-%d")
     fecha_show = datetime.now().strftime("%d/%m/%Y")
     desc = re.sub(r'Empresa\s*:.*\n?', '', full, flags=re.IGNORECASE)
     desc = re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?', '', desc, flags=re.IGNORECASE).strip()
-    if not desc: desc = full
+    if not desc:
+        desc = full
     final = mejorar_texto_profesional(desc, empresa)
     return empresa, tecnico, fecha_file, fecha_show, final
 
@@ -118,56 +131,64 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
-    print(f"Slides originales: {len(prs.slides)} - Layouts: {len(prs.slide_layouts)}")
     # Dejamos solo Portada y Gracias
+    print(f"Slides originales: {len(prs.slides)}")
     while len(prs.slides) > 2:
         delete_slide(prs, 1)
+    print(f"Slides base: {len(prs.slides)}")
 
-    total_layouts = len(prs.slide_layouts)
-    # Usamos BLANK para todo lo nuevo para que no salga "Haga clic..."
-    blank_layout = prs.slide_layouts[6] if total_layouts > 6 else prs.slide_layouts[-1]
-
+    blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     paginas = dividir_inteligente(trabajo, 850)
-    print(f"PAGINAS: {len(paginas)} FOTOS: {len(images)}")
-    sldLst = prs.slides._sldIdLst
-    gracias_id = sldLst[1] # Guardamos el ID de Gracias
+    print(f"PAGINAS TEXTO: {len(paginas)} - FOTOS: {len(images)}")
 
-    # Diapositiva 2 y 3: Texto (todas las necesarias)
+    # Creamos todo al final temporalmente: [Portada, Gracias, Textos..., Fotos...]
     for pagina in paginas:
         ns = prs.slides.add_slide(blank_layout)
-        clear_placeholders(ns) # Elimina el titulo fantasma
+        clear_placeholders(ns)
         txBox = ns.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
         tf = txBox.text_frame
         tf.word_wrap = True
         tf.text = pagina
 
-    # Diapositiva 4 y 5: Fotos (todas las necesarias)
     for img_bytes in images:
-        if len(img_bytes) < 20000: continue
+        if len(img_bytes) < 20000:
+            continue
         ns = prs.slides.add_slide(blank_layout)
         clear_placeholders(ns)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tf.write(img_bytes); path = tf.name
-        ns.shapes.add_picture(path, Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
+            tf.write(img_bytes)
+            path = tf.name
+        try:
+            ns.shapes.add_picture(path, Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
+        except Exception as e:
+            print(f"Error foto: {e}")
         os.unlink(path)
 
-    # FIX Gracias duplicado: movemos Gracias original al final
-    # Orden actual: [Portada, Gracias, Texto..., Fotos...]
-    # Queremos: [Portada, Texto..., Fotos..., Gracias]
-    sldLst.remove(gracias_id)
-    sldLst.append(gracias_id)
+    # FIX DEFINITIVO: Gracias al final, sin duplicar
+    sldLst = prs.slides._sldIdLst
+    if len(sldLst) > 2:
+        # [Portada, Gracias, T1, T2, F1, F2] -> mover T y F entre Portada y Gracias
+        nuevos_ids = list(sldLst[2:])
+        for i, nid in enumerate(nuevos_ids):
+            sldLst.remove(nid)
+            sldLst.insert(1 + i, nid)
+        # Ahora: [Portada, T1, T2, F1, F2, Gracias]
 
-    print(f"Slides finales: {len(prs.slides)}")
-    bio = io.BytesIO(); prs.save(bio); bio.seek(0)
-    safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
+    print(f"Slides finales: {len(prs.slides)} -> Portada + {len(paginas)} textos + {len(images)} fotos + Gracias")
+    bio = io.BytesIO()
+    prs.save(bio)
+    bio.seek(0)
+    safe = re.sub(r'[^A-Za-z0-9]+', '_', empresa).upper()[:20]
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
 
 @app.get("/")
-def home(): return {"ok": True}
+def home():
+    return {"ok": True, "estructura": "1-Encabezado 2-Texto 3-Texto... Fotos... Gracias"}
 
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
-    if hub_verify_token == VERIFY_TOKEN: return int(hub_challenge)
+    if hub_verify_token == VERIFY_TOKEN:
+        return int(hub_challenge)
     return "Token invalido"
 
 @app.post("/webhook")
@@ -175,28 +196,34 @@ async def webhook(req: Request):
     data = await req.json()
     try:
         v = data["entry"][0]["changes"][0]["value"]
-        if "statuses" in v or "messages" not in v: return "ok"
-        msg = v["messages"][0]; frm = msg["from"]
-        SESSIONS.setdefault(frm, {"texts":[],"images":[]})
+        if "statuses" in v or "messages" not in v:
+            return "ok"
+        msg = v["messages"][0]
+        frm = msg["from"]
+        SESSIONS.setdefault(frm, {"texts": [], "images": []})
         if msg["type"] == "text":
             body = msg["text"]["body"].strip()
-            if body.lower() in ["generar reporte","generar","reporte"]:
-                sess = SESSIONS.get(frm, {"texts":[],"images":[]})
+            if body.lower() in ["generar reporte", "generar", "reporte"]:
+                sess = SESSIONS.get(frm, {"texts": [], "images": []})
                 if not sess["texts"] and not sess["images"]:
-                    send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, f"Generando reporte...")
+                    send_text(frm, "No tengo datos")
+                    return "ok"
+                send_text(frm, f"Generando reporte con {len(sess['texts'])} textos y {len(sess['images'])} fotos...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
-                SESSIONS[frm] = {"texts":[],"images":[]}
+                SESSIONS[frm] = {"texts": [], "images": []}
             else:
                 SESSIONS[frm]["texts"].append(body)
                 send_text(frm, "Guardado ✅")
         elif msg["type"] == "image":
-            mid = msg["image"]["id"]; h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            mid = msg["image"]["id"]
+            h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             info = requests.get(f"https://graph.facebook.com/v20.0/{mid}", headers=h, timeout=15).json()
             img = requests.get(info["url"], headers=h, timeout=20).content
             SESSIONS[frm]["images"].append(img)
             send_text(frm, f"Foto {len(SESSIONS[frm]['images'])} guardada")
     except Exception as e:
-        print(e); import traceback; traceback.print_exc()
+        print(e)
+        import traceback
+        traceback.print_exc()
     return "ok"
