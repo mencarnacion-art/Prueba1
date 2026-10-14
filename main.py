@@ -41,17 +41,13 @@ def mejorar_texto_profesional(texto_raw, empresa):
         if GOOGLE_API_KEY:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={GOOGLE_API_KEY}"
-                payload = {
-                    "contents": [{"parts": [{"text": f"Eres redactor técnico de Automatyco. Corrige ortografía y redacción profesional, mantén TODO el detalle sin resumir ni cortar, sin usar ** ni ##. Cliente {empresa}: {parte}"}]}],
-                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}
-                }
+                payload = {"contents": [{"parts": [{"text": f"Eres redactor técnico de Automatyco. Corrige ortografía y redacción profesional, mantén TODO el detalle sin resumir ni cortar, sin usar ** ni ##. Cliente {empresa}: {parte}"}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}}
                 r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=40)
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    if len(txt) >= len(parte)*0.6:
-                        corregida = txt
-            except Exception as e:
-                print(e)
+                    if len(txt) >= len(parte)*0.6: corregida = txt
+            except Exception as e: print(e)
         resultado += " " + corregida
     return limpiar_markdown(resultado)
 
@@ -109,7 +105,6 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
 
-    # 1: Encabezado (sin tocar)
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
@@ -117,17 +112,16 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
-    # Dejamos solo Portada y Gracias ORIGINAL con contenido
+    # Dejamos solo Portada y Gracias
     while len(prs.slides) > 2:
         delete_slide(prs, 1)
 
     sldLst = prs.slides._sldIdLst
-    gracias_id = sldLst[1] # Guardamos la Gracias original con su texto Thank you
-
+    print(f"BASE: {len(sldLst)} slides [Portada, Gracias]")
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     paginas = dividir_inteligente(trabajo, 850)
 
-    # Creamos textos y fotos al final
+    # Agregamos todo al final: quedará [Portada, Gracias, Texto1, Foto1...]
     for pagina in paginas:
         ns = prs.slides.add_slide(blank_layout)
         clear_placeholders(ns)
@@ -145,11 +139,17 @@ def create_pptx(texts, images):
         ns.shapes.add_picture(path, Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
         os.unlink(path)
 
-    # FIX FINAL: movemos la Gracias original al final, con su contenido
-    # Antes: [Portada, Gracias, Textos..., Fotos...]
-    # Después: [Portada, Textos..., Fotos..., Gracias]
-    sldLst.remove(gracias_id)
-    sldLst.append(gracias_id)
+    # REORDENAMIENTO BLINDADO - 100% al final
+    sldLst = prs.slides._sldIdLst
+    if len(sldLst) >= 3:
+        portada_id = sldLst[0]
+        gracias_id = sldLst[1]
+        resto_ids = list(sldLst[2:]) # Todos los textos y fotos
+        nuevo_orden = [portada_id] + resto_ids + [gracias_id]
+        # Reasignamos en orden
+        for idx in range(len(nuevo_orden)):
+            sldLst[idx] = nuevo_orden[idx]
+        print(f"REORDENADO: Portada + {len(resto_ids)} slides + Gracias al final")
 
     print(f"Slides finales: {len(prs.slides)}")
     bio = io.BytesIO(); prs.save(bio); bio.seek(0)
@@ -178,7 +178,7 @@ async def webhook(req: Request):
                 sess = SESSIONS.get(frm, {"texts":[],"images":[]})
                 if not sess["texts"] and not sess["images"]:
                     send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, f"Generando reporte...")
+                send_text(frm, f"Generando...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
                 SESSIONS[frm] = {"texts":[],"images":[]}
