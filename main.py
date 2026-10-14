@@ -9,6 +9,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID") or os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN") or "automatyco123"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSIONS = {}
 TEMPLATE_PATH = "Reporte.pptx"
 
@@ -23,7 +24,7 @@ def send_doc(to, pptx_bytes, filename):
              'type': (None, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
              'messaging_product': (None, 'whatsapp')}
     r = requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/media", headers=h, files=files, timeout=30)
-    if r.status_code != 200: print(r.text); return
+    if r.status_code!= 200: print(r.text); return
     mid = r.json()["id"]
     requests.post(f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -35,27 +36,55 @@ def limpiar_markdown(t):
     t = re.sub(r'[*_`#]', '', t)
     return t.strip()
 
-def mejorar_texto(texto_raw, empresa):
-    # SI ES LARGO NO USAR IA PARA NO RECORTAR - ESTO ARREGLA LO CORTO
-    if len(texto_raw) > 2500:
-        print(f"TEXTO LARGO {len(texto_raw)} -> sin IA")
-        return limpiar_markdown(texto_raw)
-    modelos = ["models/gemini-3-flash-preview","models/gemini-2.5-flash-lite","models/gemini-2.5-flash"]
-    if GOOGLE_API_KEY:
-        for modelo in modelos:
+def mejorar_texto_profesional(texto_raw, empresa):
+    texto_raw = texto_raw.strip()
+    if not texto_raw: return texto_raw
+    # Si es muy largo > 5000, lo partimos para que Gemini no lo recorte
+    # Si es largo, lo corregimos por partes
+    partes_a_corregir = [texto_raw[i:i+3500] for i in range(0, len(texto_raw), 3500)]
+    resultado_final = ""
+
+    modelos = ["models/gemini-3-flash-preview"] # SOLO EL QUE TE FUNCIONO
+
+    for parte in partes_a_corregir:
+        corregida = None
+        if GOOGLE_API_KEY:
             try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/{modelo}:generateContent?key={GOOGLE_API_KEY}"
-                payload = {"contents":[{"parts":[{"text": f"Corrige ortografia sin resumir, mantén todo detalle, sin ** ni ##. Cliente {empresa}: {texto_raw[:8000]}"}]}], "generationConfig":{"temperature":0.2,"maxOutputTokens":8192}}
+                url = f"https://generativelanguage.googleapis.com/v1beta/{modelos[0]}:generateContent?key={GOOGLE_API_KEY}"
+                payload = {
+                    "contents": [{"parts": [{"text": f"Eres redactor técnico profesional de Automatyco. Corrige ortografía, gramática y redacta de forma profesional y técnica, sin resumir, sin omitir detalles, sin cortar, prohibido usar ** o ## o markdown, solo texto plano. Mantén todo el contenido original. Cliente {empresa}: {parte}"}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}
+                }
                 r = requests.post(url, headers={"Content-Type":"application/json"}, json=payload, timeout=40)
-                print(f"GEMINI {modelo}: {r.status_code}")
+                print(f"GEMINI {modelos[0]} {r.status_code} parte {len(parte)}")
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    if len(txt) < len(texto_raw)*0.7:
-                        print("GEMINI recorto mucho, uso original")
-                        return limpiar_markdown(texto_raw)
-                    return limpiar_markdown(txt)
-            except Exception as e: print(e)
-    return limpiar_markdown(texto_raw)
+                    # Si recorta más del 30%, no lo usamos
+                    if len(txt) < len(parte) * 0.6:
+                        print(f"Recorte excesivo {len(txt)} vs {len(parte)}, uso original")
+                        corregida = parte
+                    else:
+                        corregida = txt
+            except Exception as e:
+                print(f"Gemini error {e}")
+
+        if not corregida:
+            # Fallback OpenAI si tienes key
+            if OPENAI_API_KEY and len(parte) < 4000:
+                try:
+                    ro = requests.post("https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"},
+                        json={"model":"gpt-4o-mini","messages":[{"role":"user","content": f"Corrige ortografía profesional sin resumir ni cortar, sin **. Cliente {empresa}: {parte}"}], "max_tokens": 4000}, timeout=20)
+                    if ro.status_code == 200:
+                        corregida = ro.json()["choices"][0]["message"]["content"]
+                except: pass
+
+        if not corregida:
+            corregida = parte
+
+        resultado_final += " " + corregida
+
+    return limpiar_markdown(resultado_final)
 
 def replace_keep_format(shape, placeholder, value):
     if not shape.has_text_frame: return
@@ -69,27 +98,25 @@ def replace_keep_format(shape, placeholder, value):
             para.text = para.text.replace(placeholder, value)
             return
 
-def dividir_texto_inteligente(texto, max_chars=850):
-    # Divide por oraciones, no a mitad de palabra
-    oraciones = re.split(r'(?<=[.!?])\s+', texto)
+def dividir_inteligente(texto, max_chars=850):
+    oraciones = re.split(r'(?<=[.!?\n])\s+', texto)
     paginas = []
     actual = ""
     for o in oraciones:
-        if len(actual) + len(o) < max_chars:
-            actual += " " + o
+        if len(actual) + len(o) + 1 < max_chars:
+            actual = (actual + " " + o).strip() if actual else o
         else:
             if actual: paginas.append(actual.strip())
             if len(o) > max_chars:
-                # oración muy larga, cortarla por palabras
                 palabras = o.split()
-                temp = ""
+                tmp = ""
                 for p in palabras:
-                    if len(temp) + len(p) < max_chars:
-                        temp += " " + p
+                    if len(tmp) + len(p) < max_chars:
+                        tmp = (tmp + " " + p).strip() if tmp else p
                     else:
-                        paginas.append(temp.strip())
-                        temp = p
-                actual = temp
+                        paginas.append(tmp.strip())
+                        tmp = p
+                actual = tmp
             else:
                 actual = o
     if actual: paginas.append(actual.strip())
@@ -107,21 +134,19 @@ def parse_data(texts):
     desc = re.sub(r'Empresa\s*:.*\n?', '', full, flags=re.IGNORECASE)
     desc = re.sub(r'(Tecnico|Técnico|By)\s*:.*\n?', '', desc, flags=re.IGNORECASE).strip()
     if not desc: desc = full
-    final = mejorar_texto(desc, empresa)
+    final = mejorar_texto_profesional(desc, empresa)
+    print(f"TEXTO FINAL CORREGIDO {len(final)} chars")
     return empresa, tecnico, fecha_file, fecha_show, final
-
-def add_slide_before_last(prs, layout):
-    ns = prs.slides.add_slide(layout)
-    lst = prs.slides._sldIdLst
-    nid = lst[-1]; lst.remove(nid); lst.insert(len(lst)-1, nid)
-    return ns
 
 def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
+
+    # Layouts
     layout_text = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
     layout_blank = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else layout_text
 
+    # 1. Portada
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
@@ -129,45 +154,74 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
-    paginas = dividir_texto_inteligente(trabajo, 850)
-    print(f"PAGINAS DE TEXTO: {len(paginas)}")
+    # 2. IMPORTANTE: Borrar todas las diapositivas del medio de la plantilla
+    # Nos quedamos solo con portada (0) y final (última), el resto lo creamos nosotros en orden
+    # Guardamos la diapositiva final de gracias
+    last_slide = prs.slides[-1]
+    # Borrar del final al principio para no mover índices
+    # Dejamos slide 0 y slide 1 (texto base)
+    while len(prs.slides) > 2:
+        # Borra la slide 1 hacia adelante hasta dejar solo portada y la de gracias
+        # Pero necesitamos conservar la última (gracias)
+        # Así que borramos la slide en índice 1 si hay más de 2
+        if len(prs.slides) > 2:
+            # Si estamos borrando, necesitamos mantener la última
+            # La técnica: borrar slide 2 en adelante, dejando 0 y 1 y última
+            # Para simplificar: si len > 3, borra la slide 2
+            if len(prs.slides) > 3:
+                slide_id = prs.slides[2].slide_id
+                prs.part.drop_rel(prs.slides._sldIdLst[2].rId)
+                del prs.slides._sldIdLst[2]
+            else:
+                break
+        else:
+            break
 
+    # Ahora tenemos: [0]=portada, [1]=texto base plantilla, [2]=gracias
+    # Vamos a poner todo el texto en orden
+    paginas = dividir_inteligente(trabajo, 850)
+    print(f"PAGINAS TEXTO: {len(paginas)}")
+
+    # Slide 1 = primera página de texto
     for shape in prs.slides[1].shapes:
         if shape.has_text_frame and "{TRABAJO}" in shape.text:
             shape.text_frame.word_wrap = True
             replace_keep_format(shape, "{TRABAJO}", paginas[0] if paginas else trabajo)
 
+    # Crear slides de continuación de texto JUNTOS
+    # Insertar antes de la de gracias
     for extra in paginas[1:]:
-        ns = add_slide_before_last(prs, layout_text)
-        txBox = ns.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(9), Inches(6))
+        new_slide = prs.slides.add_slide(layout_text)
+        # Moverla antes de la última (gracias)
+        sldIdLst = prs.slides._sldIdLst
+        last = sldIdLst[-1]
+        sldIdLst.remove(last)
+        sldIdLst.append(last) # esto no, mejor insertar
+        # Reordenar correctamente: la nueva está al final, la movemos a penúltima
+        new_id = sldIdLst[-1]
+        sldIdLst.remove(new_id)
+        sldIdLst.insert(len(sldIdLst)-1, new_id)
+
+        txBox = new_slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(9), Inches(6))
         tf = txBox.text_frame
         tf.word_wrap = True
         tf.text = extra
 
-    # BORRAR slides de fotos viejas de la plantilla (slides 2 hasta -1)
-    # y crear nuevas solo para tus fotos
-    while len(prs.slides) > 3:
-        # deja slide 0 portada, 1 trabajo, y ultimas de trabajo extra + gracias
-        # pero borra los placeholders de imagen del medio
-        if len(prs.slides) <= 2: break
-        # si el slide tiene imagen placeholder de plantilla y no es de texto, lo borramos si está entre medio
-        # Simplificado: borramos todo lo que está entre slide 1 y el slide de gracias final
-        # El slide de gracias es el último
-        # Contamos cuantas paginas de texto creamos
-        break
-
-    # Fotos en diapositivas nuevas, sin encimar texto
+    # Ahora Fotos DESPUÉS del texto
     for img_bytes in images:
-        # ignora imágenes muy pequeñas o capturas de WhatsApp (fondo oscuro)
-        if len(img_bytes) < 15000:
-            print("Imagen muy pequeña, ignorada")
+        if len(img_bytes) < 20000:
+            print("Foto pequeña ignorada")
             continue
-        ns = add_slide_before_last(prs, layout_blank)
-        # fondo limpio
+        new_slide = prs.slides.add_slide(layout_blank)
+        sldIdLst = prs.slides._sldIdLst
+        new_id = sldIdLst[-1]
+        sldIdLst.remove(new_id)
+        sldIdLst.insert(len(sldIdLst)-1, new_id)
+
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             tf.write(img_bytes); path = tf.name
         try:
-            ns.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
+            new_slide.shapes.add_picture(path, Inches(0.5), Inches(0.5), Inches(9), Inches(5.5))
         except: pass
         os.unlink(path)
 
@@ -176,16 +230,13 @@ def create_pptx(texts, images):
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
 
 @app.get("/")
-def home(): return {"ok": True}
-@app.get("/debug/models")
-def debug_models():
-    if not GOOGLE_API_KEY: return {"error": "no key"}
-    r = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GOOGLE_API_KEY}")
-    return r.json()
+def home(): return {"ok": True, "V13": "Texto corregido + orden texto/fotos"}
+
 @app.get("/webhook")
 def verify(hub_verify_token: str = None, hub_challenge: str = None):
     if hub_verify_token == VERIFY_TOKEN: return int(hub_challenge)
     return "Token invalido"
+
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
@@ -200,13 +251,13 @@ async def webhook(req: Request):
                 sess = SESSIONS.get(frm, {"texts":[],"images":[]})
                 if not sess["texts"] and not sess["images"]:
                     send_text(frm, "No tengo datos"); return "ok"
-                send_text(frm, f"Generando {len(sess['texts'])} textos y {len(sess['images'])} fotos...")
+                send_text(frm, "Corrigiendo texto profesional y generando reporte...")
                 pptx, name = create_pptx(sess["texts"], sess["images"])
                 send_doc(frm, pptx, name)
                 SESSIONS[frm] = {"texts":[],"images":[]}
             else:
                 SESSIONS[frm]["texts"].append(body)
-                send_text(frm, f"Guardado ✅ ({len(SESSIONS[frm]['texts'])} textos)")
+                send_text(frm, "Guardado ✅")
         elif msg["type"] == "image":
             mid = msg["image"]["id"]; h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             info = requests.get(f"https://graph.facebook.com/v20.0/{mid}", headers=h, timeout=15).json()
