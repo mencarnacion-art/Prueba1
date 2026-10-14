@@ -109,7 +109,7 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
 
-    # Diapositiva 1: Encabezado (sin tocar)
+    # 1: Encabezado (sin tocar)
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
@@ -117,21 +117,17 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
-    # Dejamos solo Portada y Gracias para guardar el layout de Gracias
+    # Dejamos solo Portada y Gracias ORIGINAL con contenido
     while len(prs.slides) > 2:
         delete_slide(prs, 1)
 
-    # Guardamos el layout original de Gracias y lo eliminamos
-    # Así no se duplica ni queda en medio
-    gracias_layout = prs.slides[1].slide_layout
-    delete_slide(prs, 1) # Ahora solo queda Portada
+    sldLst = prs.slides._sldIdLst
+    gracias_id = sldLst[1] # Guardamos la Gracias original con su texto Thank you
 
-    print(f"Slides base: {len(prs.slides)} solo Portada")
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     paginas = dividir_inteligente(trabajo, 850)
 
-    # Diapositiva 2: Texto parte 1
-    # Diapositiva 3: Texto continuación (las que sean necesarias)
+    # Creamos textos y fotos al final
     for pagina in paginas:
         ns = prs.slides.add_slide(blank_layout)
         clear_placeholders(ns)
@@ -140,8 +136,6 @@ def create_pptx(texts, images):
         tf.word_wrap = True
         tf.text = pagina
 
-    # Diapositiva 4: Foto 1
-    # Diapositiva 5: Foto 2 (las que sean necesarias)
     for img_bytes in images:
         if len(img_bytes) < 20000: continue
         ns = prs.slides.add_slide(blank_layout)
@@ -151,10 +145,13 @@ def create_pptx(texts, images):
         ns.shapes.add_picture(path, Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
         os.unlink(path)
 
-    # Diapositiva 6: Gracias - siempre al final y solo una vez
-    prs.slides.add_slide(gracias_layout)
+    # FIX FINAL: movemos la Gracias original al final, con su contenido
+    # Antes: [Portada, Gracias, Textos..., Fotos...]
+    # Después: [Portada, Textos..., Fotos..., Gracias]
+    sldLst.remove(gracias_id)
+    sldLst.append(gracias_id)
 
-    print(f"Slides finales: {len(prs.slides)} -> 1 Portada + {len(paginas)} textos + {len(images)} fotos + 1 Gracias")
+    print(f"Slides finales: {len(prs.slides)}")
     bio = io.BytesIO(); prs.save(bio); bio.seek(0)
     safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
     return bio.getvalue(), f"{safe}_{fecha_file}.pptx"
