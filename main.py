@@ -105,6 +105,7 @@ def create_pptx(texts, images):
     empresa, tecnico, fecha_file, fecha_show, trabajo = parse_data(texts)
     prs = Presentation(TEMPLATE_PATH)
 
+    # 1: Encabezado sin tocar
     for shape in prs.slides[0].shapes:
         replace_keep_format(shape, "{Empresa}", empresa)
         replace_keep_format(shape, "{EMPRESA}", empresa)
@@ -112,16 +113,23 @@ def create_pptx(texts, images):
         replace_keep_format(shape, "{Tecnico}", tecnico)
         replace_keep_format(shape, "{FECHA}", fecha_show)
 
+    # Dejamos solo Portada y Gracias
     while len(prs.slides) > 2:
         delete_slide(prs, 1)
 
-    sldLst = prs.slides._sldIdLst
-    gracias_id = sldLst[1] # Guardamos Gracias original con contenido
-    print(f"BASE: {len(sldLst)} slides [Portada, Gracias]")
+    # Guardamos Gracias original
+    gracias_src = prs.slides[1]
+    gracias_layout = gracias_src.slide_layout
+    print(f"BASE: {len(prs.slides)} slides [Portada, Gracias] con {len(gracias_src.shapes)} shapes")
+
+    # Borramos Gracias, solo queda Portada
+    delete_slide(prs, 1)
+    print(f"Ahora solo Portada: {len(prs.slides)}")
 
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     paginas = dividir_inteligente(trabajo, 850)
 
+    # 2: Textos
     for pagina in paginas:
         ns = prs.slides.add_slide(blank_layout)
         clear_placeholders(ns)
@@ -130,6 +138,7 @@ def create_pptx(texts, images):
         tf.word_wrap = True
         tf.text = pagina
 
+    # 3: Fotos
     for img_bytes in images:
         if len(img_bytes) < 20000: continue
         ns = prs.slides.add_slide(blank_layout)
@@ -139,17 +148,28 @@ def create_pptx(texts, images):
         ns.shapes.add_picture(path, Inches(0.5), Inches(0.3), Inches(9), Inches(5.8))
         os.unlink(path)
 
-    # FIX DEFINITIVO SIN IndexError
-    sldLst = prs.slides._sldIdLst
-    # Ahora es [Portada, Gracias, Texto..., Fotos...]
-    # Lo dejamos como [Portada, Texto..., Fotos..., Gracias]
-    if len(sldLst) > 2:
+    # 4: Gracias al final - CLONADA sin deepcopy para evitar Duplicate name
+    dest = prs.slides.add_slide(gracias_layout)
+    # Copiamos el contenido de texto de la Gracias original
+    for shape in gracias_src.shapes:
+        if not shape.has_text_frame:
+            continue
+        if not shape.text.strip():
+            continue
         try:
-            sldLst.remove(gracias_id)
-            sldLst.append(gracias_id)
-            print(f"GRACIAS MOVIDA AL FINAL: {len(sldLst)} slides")
+            left, top, width, height = shape.left, shape.top, shape.width, shape.height
+            new_box = dest.shapes.add_textbox(left, top, width, height)
+            new_box.text_frame.word_wrap = True
+            # Copiamos parrafos con formato
+            new_box.text_frame.clear()
+            for para in shape.text_frame.paragraphs:
+                p = new_box.text_frame.add_paragraph()
+                p.text = para.text
+                p.alignment = para.alignment
         except Exception as e:
-            print(f"Error moviendo Gracias: {e}")
+            print(f"Error copiando texto Gracias: {e}")
+
+    print(f"Slides finales: {len(prs.slides)} -> Portada + {len(paginas)} textos + {len(images)} fotos + Gracias")
 
     bio = io.BytesIO(); prs.save(bio); bio.seek(0)
     safe = re.sub(r'[^A-Za-z0-9]+','_',empresa).upper()[:20]
